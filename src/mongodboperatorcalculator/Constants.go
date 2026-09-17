@@ -44,5 +44,4 @@ const (
 	WiredTigerCachePct = 0.50
 	RequestPct         = 0.95
 	CloseLimitPct      = 0.85
-	MinMongodCPU       = 2000 // millicores; MongoDB recommends two real cores.
 )

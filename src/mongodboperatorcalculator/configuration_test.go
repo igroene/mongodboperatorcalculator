@@ -19,6 +19,9 @@ func TestConfigurationAndMemory(t *testing.T) {
 		if dimension.MongoDBMemory+dimension.MonitorMemory > dimension.MemoryBytes {
 			t.Fatalf("dimension %d memory allocation exceeds total", id)
 		}
+		if dimension.MonitorCpu <= 0 || dimension.MonitorMemory <= 0 {
+			t.Fatalf("dimension %d must reserve PMM resources", id)
+		}
 	}
 	d := Dimension{}
 	got, e := d.ConvertMemoryToBytes("8Gi")

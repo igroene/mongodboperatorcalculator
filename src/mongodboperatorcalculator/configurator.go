@@ -38,9 +38,6 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 	if c.dimension.MongoDBMemory == 0 {
 		c.dimension.MongoDBMemory = c.dimension.MemoryBytes
 	}
-	if c.dimension.MongoDBCpu < MinMongodCPU {
-		return ResponseMessage{ErrorexecI, "Invalid request", fmt.Sprintf("mongod CPU must be at least %dm", MinMongodCPU)}, nil, fmt.Errorf("mongod CPU below minimum")
-	}
 	c.sizeMongo(FamilyTypeMongoDB, c.dimension.MongoDBCpu, c.dimension.MongoDBMemory)
 	if !r.MongoDBDedicated {
 		c.sizeMonitor(FamilyTypeMonitor, c.dimension.MonitorCpu, c.dimension.MonitorMemory)

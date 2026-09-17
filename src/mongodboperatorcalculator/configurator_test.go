@@ -12,8 +12,8 @@ func TestWiredTigerCacheIsHalfPodMemory(t *testing.T) {
 		t.Fatal(e)
 	}
 	p := f[FamilyTypeMongoDB].Groups[GroupNameConfiguration].Parameters["storage.wiredTiger.engineConfig.cacheSizeGB"]
-	if p.Value != "3.6" {
-		t.Fatalf("cache=%s want 3.6", p.Value)
+	if p.Value != "0.94" {
+		t.Fatalf("cache=%s want 0.94", p.Value)
 	}
 }
 func TestDedicatedModeOmitsSidecars(t *testing.T) {

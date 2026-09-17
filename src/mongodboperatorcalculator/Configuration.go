@@ -92,22 +92,25 @@ func (c *Configuration) Init() {
 	c.Connections = []int{50, 100, 200, 500, 1000, 2000}
 	c.MongoDBVersions = Versions{Version{7, 0, 0}, Version{8, 99, 99}}
 	c.Dimension = []Dimension{
-		{1, "XSmall", 2000, "4Gi", 4 * gb, 1800, 200, 0, 0, 3.6 * gb, 0.4 * gb, 0, 0},
-		{2, "Small", 4000, "8Gi", 8 * gb, 3600, 400, 0, 0, 7.2 * gb, 0.8 * gb, 0, 0},
-		{3, "Medium", 8000, "16Gi", 16 * gb, 7200, 800, 0, 0, 14.4 * gb, 1.6 * gb, 0, 0},
-		{4, "Large", 16000, "32Gi", 32 * gb, 14400, 1600, 0, 0, 28.8 * gb, 3.2 * gb, 0, 0},
-		{5, "2XLarge", 32000, "64Gi", 64 * gb, 31400, 600, 0, 0, 63.5 * gb, 0.5 * gb, 0, 0},
-		{6, "4XLarge", 64000, "128Gi", 128 * gb, 63000, 1000, 0, 0, 127.5 * gb, 0.5 * gb, 0, 0},
-		{7, "8XLarge", 96000, "192Gi", 192 * gb, 95000, 1000, 0, 0, 191.5 * gb, 0.5 * gb, 0, 0},
-		{8, "12XLarge", 128000, "256Gi", 256 * gb, 126500, 1500, 0, 0, 254 * gb, 2 * gb, 0, 0},
-		{9, "16XLarge", 192000, "384Gi", 384 * gb, 189500, 2500, 0, 0, 381 * gb, 3 * gb, 0, 0},
-		{10, "24XLarge", 256000, "512Gi", 512 * gb, 252000, 4000, 0, 0, 508 * gb, 4 * gb, 0, 0},
+		{1, "XSmall", 600, "1Gi", 1 * gb, 500, 100, 0, 0, 896 * mib, 128 * mib, 0, 0},
+		{2, "Small", 800, "2Gi", 2 * gb, 700, 100, 0, 0, 1920 * mib, 128 * mib, 0, 0},
+		{3, "Medium", 1000, "4Gi", 4 * gb, 800, 200, 0, 0, 3840 * mib, 256 * mib, 0, 0},
+		{4, "Large", 2000, "8Gi", 8 * gb, 1700, 300, 0, 0, 7680 * mib, 512 * mib, 0, 0},
+		{5, "XLarge", 4000, "16Gi", 16 * gb, 3600, 400, 0, 0, 15872 * mib, 512 * mib, 0, 0},
+		{6, "2XLarge", 8000, "32Gi", 32 * gb, 7500, 500, 0, 0, 31744 * mib, 1 * gb, 0, 0},
+		{7, "4XLarge", 16000, "64Gi", 64 * gb, 15000, 1000, 0, 0, 63 * gb, 1 * gb, 0, 0},
+		{8, "8XLarge", 32000, "128Gi", 128 * gb, 31000, 1000, 0, 0, 127 * gb, 1 * gb, 0, 0},
+		{9, "12XLarge", 64000, "256Gi", 256 * gb, 62500, 1500, 0, 0, 254 * gb, 2 * gb, 0, 0},
+		{10, "16XLarge", 128000, "512Gi", 512 * gb, 126000, 2000, 0, 0, 510 * gb, 2 * gb, 0, 0},
 		{DimensionOpen, "Open request by resources", 0, "0", 0, 0, 0, 0, 0, 0, 0, 0, 0},
 	}
 	c.LoadType = []LoadType{{1, "Mainly Reads", "Read-heavy workload"}, {2, "Light OLTP", "Mixed workload with moderate writes"}, {3, "Heavy OLTP", "Highly concurrent mixed workload"}, {4, "Mainly Writes", "Write-heavy workload"}}
 }
 
-const gb = 1024 * 1024 * 1024
+const (
+	mib = 1024 * 1024
+	gb  = 1024 * mib
+)
 
 func (c Configuration) GetDimensionByID(id int) Dimension {
 	for _, d := range c.Dimension {
