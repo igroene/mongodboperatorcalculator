@@ -165,7 +165,11 @@ func (c Configuration) Families(req ConfigurationRequest) map[string]Family {
 	f := map[string]Family{}
 	f[FamilyTypeMongoDB] = newFamily("mongod")
 	if !req.MongoDBDedicated {
-		f[FamilyTypeMonitor] = newFamily("pmm-client")
+		if req.DBType == DbTypeShardedCluster {
+			f[FamilyTypeMonitor] = newPMMFamily()
+		} else {
+			f[FamilyTypeMonitor] = newFamily("pmm-client")
+		}
 	}
 	if req.DBType == DbTypeShardedCluster {
 		f[FamilyTypeMongos] = newFamily("mongos")
@@ -173,13 +177,29 @@ func (c Configuration) Families(req ConfigurationRequest) map[string]Family {
 	}
 	return f
 }
+func newPMMFamily() Family {
+	return Family{Name: "pmm-client", Groups: map[string]GroupObj{
+		"mongod.resources":            {Name: "mongod.resources", Parameters: map[string]Parameter{}},
+		"mongod.readinessProbe":       {Name: "mongod.readinessProbe", Parameters: map[string]Parameter{}},
+		"mongod.livenessProbe":        {Name: "mongod.livenessProbe", Parameters: map[string]Parameter{}},
+		"configserver.resources":      {Name: "configserver.resources", Parameters: map[string]Parameter{}},
+		"configserver.readinessProbe": {Name: "configserver.readinessProbe", Parameters: map[string]Parameter{}},
+		"configserver.livenessProbe":  {Name: "configserver.livenessProbe", Parameters: map[string]Parameter{}},
+		"mongos.resources":            {Name: "mongos.resources", Parameters: map[string]Parameter{}},
+		"mongos.readinessProbe":       {Name: "mongos.readinessProbe", Parameters: map[string]Parameter{}},
+		"mongos.livenessProbe":        {Name: "mongos.livenessProbe", Parameters: map[string]Parameter{}},
+	}}
+}
 func newFamily(name string) Family {
 	return Family{Name: name, Groups: map[string]GroupObj{GroupNameConfiguration: {Name: "configuration", Parameters: map[string]Parameter{}}, GroupNameResources: {Name: "resources", Parameters: map[string]Parameter{}}, "readinessProbe": {Name: "readinessProbe", Parameters: map[string]Parameter{}}, "livenessProbe": {Name: "livenessProbe", Parameters: map[string]Parameter{}}}}
 }
 func put(f Family, group, key, value string) {
 	g := f.Groups[group]
-	g.Parameters[key] = Parameter{Name: key, Value: value}
+	putGroup(&g, key, value)
 	f.Groups[group] = g
+}
+func putGroup(g *GroupObj, key, value string) {
+	g.Parameters[key] = Parameter{Name: key, Value: value}
 }
 func formatGB(bytes float64) string {
 	return strconv.FormatFloat(math.Round(bytes/float64(gb)*100)/100, 'f', -1, 64)

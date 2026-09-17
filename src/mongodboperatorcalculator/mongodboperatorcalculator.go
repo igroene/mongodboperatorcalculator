@@ -34,18 +34,7 @@ func (m *MongoDBOperatorCalculator) Init(req ConfigurationRequest, conf Configur
 			d.MonitorCpu = int(float64(d.MonitorCpu) * (1 - req.ProviderCostPct))
 			d.MonitorMemory *= 1 - req.ProviderCostPct
 		}
-		if m.IncomingRequest.DBType == DbTypeShardedCluster {
-			// A sharded request is a planning envelope for one shard member,
-			// one config-server member, one mongos, and PMM.
-			d.MongoDBCpu = int(float64(d.Cpu) * 0.70)
-			d.ConfigCpu = int(float64(d.Cpu) * 0.15)
-			d.MongosCpu = int(float64(d.Cpu) * 0.10)
-			d.MonitorCpu = d.Cpu - d.MongoDBCpu - d.ConfigCpu - d.MongosCpu
-			d.MongoDBMemory = d.MemoryBytes * 0.70
-			d.ConfigMemory = d.MemoryBytes * 0.15
-			d.MongosMemory = d.MemoryBytes * 0.10
-			d.MonitorMemory = d.MemoryBytes - d.MongoDBMemory - d.ConfigMemory - d.MongosMemory
-		} else if m.IncomingRequest.MongoDBDedicated {
+		if m.IncomingRequest.MongoDBDedicated {
 			d.MongoDBCpu = d.Cpu
 			d.MongoDBMemory = d.MemoryBytes
 		}

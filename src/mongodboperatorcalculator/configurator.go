@@ -40,10 +40,14 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 	}
 	c.sizeMongo(FamilyTypeMongoDB, c.dimension.MongoDBCpu, c.dimension.MongoDBMemory)
 	if !r.MongoDBDedicated {
-		c.sizeMonitor(FamilyTypeMonitor, c.dimension.MonitorCpu, c.dimension.MonitorMemory)
 		if r.DBType == DbTypeShardedCluster {
+			c.sizeMonitorComponent("mongod", c.dimension.MonitorCpu, c.dimension.MonitorMemory)
 			c.sizeMongos()
 			c.sizeConfig()
+			c.sizeMonitorComponent("configserver", c.configCPU(), c.configMemory())
+			c.sizeMonitorComponent("mongos", c.mongosCPU(), c.mongosMemory())
+		} else {
+			c.sizeMonitor(FamilyTypeMonitor, c.dimension.MonitorCpu, c.dimension.MonitorMemory)
 		}
 	}
 	pct := c.capacityPct()
@@ -79,28 +83,28 @@ func (c *Configurator) sizeMongo(name string, cpu int, mem float64) {
 	c.families[name] = f
 }
 func (c *Configurator) sizeConfig() {
-	d := c.dimension
-	mem := d.ConfigMemory
-	cpu := d.ConfigCpu
-	if mem == 0 {
-		mem = d.MemoryBytes * 0.15
-	}
-	if cpu == 0 {
-		cpu = max(500, int(float64(d.Cpu)*0.15))
-	}
-	c.sizeRole(FamilyTypeConfig, cpu, mem, false)
+	c.sizeMongoRole(FamilyTypeConfig, c.configCPU(), c.configMemory())
 }
 func (c *Configurator) sizeMongos() {
-	d := c.dimension
-	mem := d.MongosMemory
-	cpu := d.MongosCpu
-	if mem == 0 {
-		mem = d.MemoryBytes * 0.15
-	}
-	if cpu == 0 {
-		cpu = int(float64(d.Cpu) * 0.15)
-	}
-	c.sizeRole(FamilyTypeMongos, cpu, mem, true)
+	c.sizeRole(FamilyTypeMongos, c.mongosCPU(), c.mongosMemory(), true)
+}
+func (c *Configurator) configCPU() int { return max(500, int(float64(c.dimension.MongoDBCpu)*0.25)) }
+func (c *Configurator) configMemory() float64 {
+	return math.Max(float64(1<<30), c.dimension.MongoDBMemory*0.25)
+}
+func (c *Configurator) mongosCPU() int { return max(500, int(float64(c.dimension.MongoDBCpu)*0.10)) }
+func (c *Configurator) mongosMemory() float64 {
+	return math.Max(float64(512*1024*1024), c.dimension.MongoDBMemory*0.10)
+}
+func (c *Configurator) sizeMongoRole(name string, cpu int, mem float64) {
+	f := c.families[name]
+	cache := mem * WiredTigerCachePct
+	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", formatGB(cache))
+	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
+	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
+	c.setResources(f, cpu, mem)
+	c.setProbes(f)
+	c.families[name] = f
 }
 func (c *Configurator) sizeRole(name string, cpu int, mem float64, router bool) {
 	f := c.families[name]
@@ -122,6 +126,27 @@ func (c *Configurator) sizeMonitor(name string, cpu int, mem float64) {
 	c.setResources(f, cpu, mem)
 	c.setProbes(f)
 	c.families[name] = f
+}
+func (c *Configurator) sizeMonitorComponent(component string, cpu int, mem float64) {
+	f := c.families[FamilyTypeMonitor]
+	for _, group := range []string{GroupNameResources, GroupNameReadinessProbe, GroupNameLivenessProbe} {
+		key := component + "." + group
+		f.Groups[key] = GroupObj{Name: key, Parameters: map[string]Parameter{}}
+	}
+	resources := f.Groups[component+"."+GroupNameResources]
+	putGroup(&resources, "request_cpu", fmt.Sprintf("%dm", int(float64(cpu)*RequestPct)))
+	putGroup(&resources, "limit_cpu", fmt.Sprintf("%dm", cpu))
+	putGroup(&resources, "request_memory", strconv.FormatInt(int64(mem*RequestPct), 10))
+	putGroup(&resources, "limit_memory", strconv.FormatInt(int64(mem), 10))
+	f.Groups[resources.Name] = resources
+	readiness := f.Groups[component+"."+GroupNameReadinessProbe]
+	liveness := f.Groups[component+"."+GroupNameLivenessProbe]
+	factor := 1 + float64(c.request.Connections)/1000
+	putGroup(&readiness, "timeoutSeconds", strconv.Itoa(max(5, int(math.Ceil(15*factor)))))
+	putGroup(&liveness, "timeoutSeconds", strconv.Itoa(max(10, int(math.Ceil(30*factor)))))
+	f.Groups[readiness.Name] = readiness
+	f.Groups[liveness.Name] = liveness
+	c.families[FamilyTypeMonitor] = f
 }
 func (c *Configurator) setResources(f Family, cpu int, mem float64) {
 	put(f, GroupNameResources, "request_cpu", fmt.Sprintf("%dm", int(float64(cpu)*RequestPct)))

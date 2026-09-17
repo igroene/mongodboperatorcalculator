@@ -73,7 +73,7 @@ Invalid requests return message type `5001` and HTTP status `400`. `connections:
 
 ## Supported Dimensions
 
-Predefined dimensions are total resource envelopes. Replica-set results describe one `mongod` member plus PMM. Sharded results split the envelope between one shard `mongod`, one config-server member, one `mongos`, and PMM; values are not multiplied by shard count.
+Predefined dimensions are per-`mongod` pod profiles. Replica-set results describe one `mongod` member plus PMM. Sharded results use the same profile independently for each shard `mongod` pod; config-server and `mongos` pods receive separate derived profiles and their resources are not deducted from the shard profile.
 
 | ID | Name | Total CPU | Total Memory | PMM CPU | PMM Memory |
 |---:|---|---:|---:|---:|---:|
@@ -128,7 +128,11 @@ Dedicated mode:
 ## Sizing Rules
 
 - WiredTiger cache is always `50%` of the `mongod` pod memory limit.
-- The remainder is reserved for filesystem cache, connections, active operations, process overhead, PMM, and safety margin.
+- The shard `mongod` uses the full selected `mongod` CPU and memory profile. Config-server and `mongos` resources are separate pod recommendations.
+- Config-server profile: `max(500m, mongod CPU × 0.25)` and `max(1Gi, mongod memory × 0.25)`.
+- `mongos` profile: `max(500m, mongod CPU × 0.10)` and `max(512Mi, mongod memory × 0.10)`.
+- PMM sidecars are emitted for shard `mongod`, config-server `mongod`, and `mongos` in sharded deployments.
+- The remaining memory within each `mongod` pod is reserved for filesystem cache, connections, active operations, process overhead, and safety margin.
 - CPU pressure is estimated from connections and workload profile.
 - `mongos` does not receive a WiredTiger cache allocation.
 - Kubernetes requests are calculated as 95% of the corresponding limits.
@@ -355,18 +359,18 @@ Request:
 }
 ```
 
-Expected output families and values:
+Expected output families and representative values. Every component is an independent pod; no shard count or replica-set member count is assumed:
 
 ```json
 {
-  "message": {"type": 1001, "name": "Execution was successful and resources match the requested workload", "text": "estimated capacity utilization is 72%"},
+  "message": {"type": 1001, "name": "Execution was successful and resources match the requested workload", "text": "estimated capacity utilization is 70%"},
   "incoming": {
     "dbtype": "sharded_cluster",
     "dimension": {
       "id": 3, "name": "Medium", "cpu": 1000, "memory": "4Gi",
-      "mongodbCpu": 700, "monitorCpu": 50, "mongosCpu": 100, "configCpu": 150,
-      "mongodbMemory": 3006477107.2, "monitorMemory": 214748364.8000002,
-      "mongosMemory": 429496729.6, "configMemory": 644245094.4
+      "mongodbCpu": 800, "monitorCpu": 200, "mongosCpu": 0, "configCpu": 0,
+      "mongodbMemory": 4026531840, "monitorMemory": 268435456,
+      "mongosMemory": 0, "configMemory": 0
     },
     "loadtype": {"id": 2, "name": "Light OLTP", "example": "Mixed workload with moderate writes"},
     "connections": 500,
@@ -382,16 +386,16 @@ Expected output families and values:
         "configuration": {"name": "configuration", "parameters": {}},
         "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
         "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "150m"}, "limit_memory": {"name": "limit_memory", "value": "644245094"}, "request_cpu": {"name": "request_cpu", "value": "142m"}, "request_memory": {"name": "request_memory", "value": "611032839"}}}
+        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "1073741824"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "1020054732"}}}
       }
     },
     "mongodb": {
       "name": "mongod",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"}, "storage.engine": {"name": "storage.engine", "value": "wiredTiger"}, "storage.wiredTiger.engineConfig.cacheSizeGB": {"name": "storage.wiredTiger.engineConfig.cacheSizeGB", "value": "1.4"}}},
+        "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"}, "storage.engine": {"name": "storage.engine", "value": "wiredTiger"}, "storage.wiredTiger.engineConfig.cacheSizeGB": {"name": "storage.wiredTiger.engineConfig.cacheSizeGB", "value": "1.88"}}},
         "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
         "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "700m"}, "limit_memory": {"name": "limit_memory", "value": "3006477107"}, "request_cpu": {"name": "request_cpu", "value": "665m"}, "request_memory": {"name": "request_memory", "value": "2856153252"}}}
+        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "800m"}, "limit_memory": {"name": "limit_memory", "value": "4026531840"}, "request_cpu": {"name": "request_cpu", "value": "760m"}, "request_memory": {"name": "request_memory", "value": "3825205248"}}}
       }
     },
     "mongos": {
@@ -400,16 +404,21 @@ Expected output families and values:
         "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"}}},
         "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
         "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "100m"}, "limit_memory": {"name": "limit_memory", "value": "429496729"}, "request_cpu": {"name": "request_cpu", "value": "95m"}, "request_memory": {"name": "request_memory", "value": "408021893"}}}
+        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "536870912"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "510027366"}}}
       }
     },
     "monitor": {
       "name": "pmm-client",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "50m"}, "limit_memory": {"name": "limit_memory", "value": "214748364"}, "request_cpu": {"name": "request_cpu", "value": "47m"}, "request_memory": {"name": "request_memory", "value": "204010946"}}}
+        "mongod.resources": {"name": "mongod.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "200m"}, "limit_memory": {"name": "limit_memory", "value": "268435456"}, "request_cpu": {"name": "request_cpu", "value": "190m"}, "request_memory": {"name": "request_memory", "value": "255013683"}}},
+        "mongod.readinessProbe": {"name": "mongod.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
+        "mongod.livenessProbe": {"name": "mongod.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
+        "configserver.resources": {"name": "configserver.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "1073741824"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "1020054732"}}},
+        "configserver.readinessProbe": {"name": "configserver.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
+        "configserver.livenessProbe": {"name": "configserver.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
+        "mongos.resources": {"name": "mongos.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "536870912"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "510027366"}}},
+        "mongos.readinessProbe": {"name": "mongos.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
+        "mongos.livenessProbe": {"name": "mongos.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}}
       }
     }
   }
@@ -526,7 +535,7 @@ request_cpu = 95m
 request_memory = 127506841
 ```
 
-Sharded output uses `mongod`, `configserver.mongod`, `mongos`, and `pmm-client` sections. Values are sorted deterministically.
+Sharded output uses `mongod`, `configserver.mongod`, `mongos`, and component-specific PMM sections such as `pmm-client.mongod.resources`, `pmm-client.configserver.resources`, and `pmm-client.mongos.resources`. Values are sorted deterministically.
 
 ## Using as a Go Module
 
