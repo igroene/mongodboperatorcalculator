@@ -25,13 +25,17 @@ const (
 	DbTypeReplicaSet     = "replica_set"
 	DbTypeShardedCluster = "sharded_cluster"
 
-	FamilyTypeMongoDB      = "mongodb"
-	FamilyTypeMongos       = "mongos"
-	FamilyTypeConfig       = "configserver"
-	FamilyTypeMonitor      = "monitor"
-	GroupNameConfiguration = "configuration"
-	GroupNameResources     = "resources"
-	GroupNameProbes        = "probes"
+	FamilyTypeMongoDB       = "mongodb"
+	FamilyTypeMongos        = "mongos"
+	FamilyTypeConfig        = "configserver"
+	FamilyTypeMonitor       = "monitor"
+	GroupNameConfiguration  = "configuration"
+	GroupNameResources      = "resources"
+	GroupNameReadinessProbe = "readinessProbe"
+	GroupNameLivenessProbe  = "livenessProbe"
+	// GroupNameProbes is retained for source compatibility. Probe values are
+	// emitted in the readinessProbe and livenessProbe groups.
+	GroupNameProbes = "probes"
 
 	ResultOutputFormatJson  = "json"
 	ResultOutputFormatHuman = "human"

@@ -11,15 +11,19 @@ type MongoDBOperatorCalculator struct {
 	IncomingRequest ConfigurationRequest
 	Conf            Configuration
 	configurator    Configurator
+	initError       error
 }
 
 func (m *MongoDBOperatorCalculator) Init(req ConfigurationRequest, conf Configuration) ConfigurationRequest {
 	m.IncomingRequest = req
 	m.Conf = conf
 	if m.IncomingRequest.Dimension.Id == DimensionOpen && m.IncomingRequest.Dimension.MemoryBytes == 0 {
-		m.IncomingRequest.Dimension.MemoryBytes, _ = m.IncomingRequest.Dimension.ConvertMemoryToBytes(m.IncomingRequest.Dimension.Memory)
+		m.IncomingRequest.Dimension.MemoryBytes, m.initError = m.IncomingRequest.Dimension.ConvertMemoryToBytes(m.IncomingRequest.Dimension.Memory)
 	}
 	d, e := conf.ResolveDimension(m.IncomingRequest.Dimension)
+	if e != nil && m.initError == nil {
+		m.initError = e
+	}
 	if e == nil {
 		if req.ProviderCostPct > 0 {
 			d.Cpu = int(float64(d.Cpu) * (1 - req.ProviderCostPct))
@@ -41,6 +45,9 @@ func (m *MongoDBOperatorCalculator) Init(req ConfigurationRequest, conf Configur
 			d.ConfigMemory = d.MemoryBytes * 0.15
 			d.MongosMemory = d.MemoryBytes * 0.10
 			d.MonitorMemory = d.MemoryBytes - d.MongoDBMemory - d.ConfigMemory - d.MongosMemory
+		} else if m.IncomingRequest.MongoDBDedicated {
+			d.MongoDBCpu = d.Cpu
+			d.MongoDBMemory = d.MemoryBytes
 		}
 		m.IncomingRequest.Dimension = d
 	}
@@ -53,11 +60,17 @@ func (m *MongoDBOperatorCalculator) GetSupportedLayouts() Configuration {
 	return c
 }
 func (m *MongoDBOperatorCalculator) GetCalculate() (error, ResponseMessage, map[string]Family) {
+	if m.initError != nil {
+		return m.initError, ResponseMessage{ErrorexecI, "Invalid request", m.initError.Error()}, map[string]Family{}
+	}
 	if m.IncomingRequest.Dimension.Id == 0 || m.IncomingRequest.LoadType.Id == 0 {
-		return fmt.Errorf("dimension and loadtype are required"), ResponseMessage{ErrorexecI, "Invalid request", "dimension and loadtype are required"}, nil
+		return fmt.Errorf("dimension and loadtype are required"), ResponseMessage{ErrorexecI, "Invalid request", "dimension and loadtype are required"}, map[string]Family{}
 	}
 	m.configurator = Configurator{request: m.IncomingRequest, dimension: m.IncomingRequest.Dimension, families: m.Conf.Families(m.IncomingRequest)}
 	msg, f, e := m.configurator.calculate()
+	if f == nil {
+		f = map[string]Family{}
+	}
 	return e, msg, f
 }
 func (m *MongoDBOperatorCalculator) GetJSONOutput(msg ResponseMessage, req ConfigurationRequest, f map[string]Family) (bytes.Buffer, error) {
@@ -80,7 +93,16 @@ func (m *MongoDBOperatorCalculator) GetHumanOutput(msg ResponseMessage, req Conf
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(&b, "\n[%s]\n", k)
+		section := k
+		if k == FamilyTypeMongoDB {
+			section = "mongod"
+		} else if k == FamilyTypeConfig {
+			section = "configserver.mongod"
+		} else if k == FamilyTypeMonitor {
+			section = "pmm-client"
+		} else if k == FamilyTypeMongos {
+			section = "mongos"
+		}
 		groups := f[k].Groups
 		gkeys := make([]string, 0, len(groups))
 		for x := range groups {
@@ -88,7 +110,7 @@ func (m *MongoDBOperatorCalculator) GetHumanOutput(msg ResponseMessage, req Conf
 		}
 		sort.Strings(gkeys)
 		for _, x := range gkeys {
-			fmt.Fprintf(&b, "[%s.%s]\n", k, x)
+			fmt.Fprintf(&b, "[%s.%s]\n", section, x)
 			pkeys := make([]string, 0, len(groups[x].Parameters))
 			for p := range groups[x].Parameters {
 				pkeys = append(pkeys, p)

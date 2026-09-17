@@ -28,12 +28,18 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 	if r.MongoDBDedicated && r.DBType == DbTypeShardedCluster {
 		return ResponseMessage{ErrorexecI, "Invalid request", "dedicated mode is only valid for replica_set"}, nil, fmt.Errorf("dedicated mode cannot be used with sharded_cluster")
 	}
+	if r.ProviderCostPct < 0 || r.ProviderCostPct >= 1 {
+		return ResponseMessage{ErrorexecI, "Invalid request", "providercostpct must be greater than or equal to 0 and less than 1"}, nil, fmt.Errorf("invalid providercostpct")
+	}
 	f := c.families
 	if c.dimension.MongoDBCpu == 0 {
 		c.dimension.MongoDBCpu = c.dimension.Cpu
 	}
 	if c.dimension.MongoDBMemory == 0 {
 		c.dimension.MongoDBMemory = c.dimension.MemoryBytes
+	}
+	if c.dimension.MongoDBCpu < MinMongodCPU {
+		return ResponseMessage{ErrorexecI, "Invalid request", fmt.Sprintf("mongod CPU must be at least %dm", MinMongodCPU)}, nil, fmt.Errorf("mongod CPU below minimum")
 	}
 	c.sizeMongo(FamilyTypeMongoDB, c.dimension.MongoDBCpu, c.dimension.MongoDBMemory)
 	if !r.MongoDBDedicated {

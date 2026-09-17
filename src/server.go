@@ -2,54 +2,137 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	MO "github.com/igroene/mongodboperatorcalculator/src/mongodboperatorcalculator"
 )
 
 func main() {
-	addr := "0.0.0.0:" + strconv.Itoa(8080)
-	if len(os.Args) > 1 {
-		addr = os.Args[1]
+	address := flag.String("address", "0.0.0.0", "IP address or hostname to bind to")
+	port := flag.Int("port", 8080, "TCP port to listen on")
+	logLevel := flag.String("loglevel", "INFO", "log level: ERROR, INFO, or DEBUG")
+	showVersion := flag.Bool("version", false, "print the calculator version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "MongoDB Operator Calculator %s\n\n", MO.VERSION)
+		fmt.Fprintln(flag.CommandLine.Output(), "Endpoints:")
+		fmt.Fprintln(flag.CommandLine.Output(), "  GET  /supported   Return supported layouts")
+		fmt.Fprintln(flag.CommandLine.Output(), "  POST /calculator  Calculate a MongoDB configuration")
+		fmt.Fprintln(flag.CommandLine.Output(), "\nFlags:")
+		flag.PrintDefaults()
 	}
-	http.HandleFunc("/supported", supported)
-	http.HandleFunc("/calculator", calculator)
-	fmt.Println(http.ListenAndServe(addr, nil))
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(MO.VERSION)
+		return
+	}
+	logger := newLogger(*logLevel)
+	server := &http.Server{Addr: *address + ":" + strconv.Itoa(*port), Handler: routes(logger)}
+	logger.Printf("starting MongoDB Operator Calculator on %s", server.Addr)
+	if err := server.ListenAndServe(); err != nil {
+		logger.Printf("server stopped: %v", err)
+		os.Exit(1)
+	}
 }
-func supported(w http.ResponseWriter, r *http.Request) {
-	var c MO.Configuration
-	c.Init()
+
+func newLogger(level string) *log.Logger {
+	level = strings.ToUpper(level)
+	if level != "ERROR" && level != "INFO" && level != "DEBUG" {
+		level = "INFO"
+	}
+	return log.New(os.Stderr, "mongodboperatorcalculator "+level+": ", log.LstdFlags)
+}
+
+func routes(logger *log.Logger) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/supported", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		var conf MO.Configuration
+		conf.Init()
+		writeJSON(w, http.StatusOK, conf)
+	})
+	mux.HandleFunc("/calculator", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		calculateRequest(w, r, logger)
+	})
+	return mux
+}
+
+func calculateRequest(w http.ResponseWriter, r *http.Request, logger *log.Logger) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to read request body: %v", err))
+		return
+	}
+	var request MO.ConfigurationRequest
+	if len(body) == 0 {
+		writeError(w, http.StatusBadRequest, "empty request body")
+		return
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "malformed JSON: "+err.Error())
+		return
+	}
+	var conf MO.Configuration
+	conf.Init()
+	var calculator MO.MongoDBOperatorCalculator
+	request = calculator.Init(request, conf)
+	calculationErr, message, families := calculator.GetCalculate()
+	status := http.StatusOK
+	if message.MType == MO.ErrorexecI {
+		status = http.StatusBadRequest
+	} else if message.MType == MO.OverutilizingI {
+		status = http.StatusUnprocessableEntity
+	}
+	if calculationErr != nil {
+		logger.Printf("calculation returned type %d: %v", message.MType, calculationErr)
+	}
+	if request.Output == MO.ResultOutputFormatHuman {
+		output, outputErr := calculator.GetHumanOutput(message, request, families)
+		if outputErr != nil {
+			writeError(w, http.StatusInternalServerError, outputErr.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(status)
+		_, _ = w.Write(output.Bytes())
+		return
+	}
+	output, outputErr := calculator.GetJSONOutput(message, request, families)
+	if outputErr != nil {
+		writeError(w, http.StatusInternalServerError, outputErr.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(c)
+	w.WriteHeader(status)
+	_, _ = w.Write(output.Bytes())
 }
-func calculator(w http.ResponseWriter, r *http.Request) {
-	body, e := io.ReadAll(r.Body)
-	if e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	var req MO.ConfigurationRequest
-	if e = json.Unmarshal(body, &req); e != nil {
-		http.Error(w, e.Error(), 400)
-		return
-	}
-	var c MO.Configuration
-	c.Init()
-	var calc MO.MongoDBOperatorCalculator
-	req = calc.Init(req, c)
-	e, msg, f := calc.GetCalculate()
-	if req.Output == MO.ResultOutputFormatHuman {
-		out, _ := calc.GetHumanOutput(msg, req, f)
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write(out.Bytes())
-	} else {
-		out, _ := calc.GetJSONOutput(msg, req, f)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(out.Bytes())
-	}
-	_ = e
+
+func methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+func writeError(w http.ResponseWriter, status int, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": text})
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
