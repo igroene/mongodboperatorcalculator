@@ -96,6 +96,12 @@ func (c *Configuration) Init() {
 		{2, "Small", 4000, "8Gi", 8 * gb, 3600, 400, 0, 0, 7.2 * gb, 0.8 * gb, 0, 0},
 		{3, "Medium", 8000, "16Gi", 16 * gb, 7200, 800, 0, 0, 14.4 * gb, 1.6 * gb, 0, 0},
 		{4, "Large", 16000, "32Gi", 32 * gb, 14400, 1600, 0, 0, 28.8 * gb, 3.2 * gb, 0, 0},
+		{5, "2XLarge", 32000, "64Gi", 64 * gb, 31400, 600, 0, 0, 63.5 * gb, 0.5 * gb, 0, 0},
+		{6, "4XLarge", 64000, "128Gi", 128 * gb, 63000, 1000, 0, 0, 127.5 * gb, 0.5 * gb, 0, 0},
+		{7, "8XLarge", 96000, "192Gi", 192 * gb, 95000, 1000, 0, 0, 191.5 * gb, 0.5 * gb, 0, 0},
+		{8, "12XLarge", 128000, "256Gi", 256 * gb, 126500, 1500, 0, 0, 254 * gb, 2 * gb, 0, 0},
+		{9, "16XLarge", 192000, "384Gi", 384 * gb, 189500, 2500, 0, 0, 381 * gb, 3 * gb, 0, 0},
+		{10, "24XLarge", 256000, "512Gi", 512 * gb, 252000, 4000, 0, 0, 508 * gb, 4 * gb, 0, 0},
 		{DimensionOpen, "Open request by resources", 0, "0", 0, 0, 0, 0, 0, 0, 0, 0, 0},
 	}
 	c.LoadType = []LoadType{{1, "Mainly Reads", "Read-heavy workload"}, {2, "Light OLTP", "Mixed workload with moderate writes"}, {3, "Heavy OLTP", "Highly concurrent mixed workload"}, {4, "Mainly Writes", "Write-heavy workload"}}

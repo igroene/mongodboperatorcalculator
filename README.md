@@ -81,6 +81,12 @@ Predefined dimensions are total resource envelopes. Replica-set results describe
 | `2` | Small | `4000m` | `8Gi` |
 | `3` | Medium | `8000m` | `16Gi` |
 | `4` | Large | `16000m` | `32Gi` |
+| `5` | 2XLarge | `32000m` | `64Gi` |
+| `6` | 4XLarge | `64000m` | `128Gi` |
+| `7` | 8XLarge | `96000m` | `192Gi` |
+| `8` | 12XLarge | `128000m` | `256Gi` |
+| `9` | 16XLarge | `192000m` | `384Gi` |
+| `10` | 24XLarge | `256000m` | `512Gi` |
 | `999` | Open request by resources | User supplied | User supplied |
 
 MongoDB recommends at least two real CPU cores for a `mongod` or `mongos`. The calculator enforces a minimum `2000m` `mongod` allocation.
@@ -198,6 +204,12 @@ Example response:
     {"id": 2, "name": "Small", "cpu": 4000, "memory": "8Gi"},
     {"id": 3, "name": "Medium", "cpu": 8000, "memory": "16Gi"},
     {"id": 4, "name": "Large", "cpu": 16000, "memory": "32Gi"},
+    {"id": 5, "name": "2XLarge", "cpu": 32000, "memory": "64Gi"},
+    {"id": 6, "name": "4XLarge", "cpu": 64000, "memory": "128Gi"},
+    {"id": 7, "name": "8XLarge", "cpu": 96000, "memory": "192Gi"},
+    {"id": 8, "name": "12XLarge", "cpu": 128000, "memory": "256Gi"},
+    {"id": 9, "name": "16XLarge", "cpu": 192000, "memory": "384Gi"},
+    {"id": 10, "name": "24XLarge", "cpu": 256000, "memory": "512Gi"},
     {"id": 999, "name": "Open request by resources", "cpu": 0, "memory": "0"}
   ],
   "loadtype": [

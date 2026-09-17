@@ -5,8 +5,20 @@ import "testing"
 func TestConfigurationAndMemory(t *testing.T) {
 	var c Configuration
 	c.Init()
-	if len(c.Dimension) != 5 || c.GetDimensionByID(2).MemoryBytes == 0 {
+	if len(c.Dimension) != 11 || c.GetDimensionByID(2).MemoryBytes == 0 {
 		t.Fatal("configuration not initialized")
+	}
+	for id := 1; id <= 10; id++ {
+		dimension := c.GetDimensionByID(id)
+		if dimension.Id != id || dimension.Cpu <= 0 || dimension.MemoryBytes <= 0 {
+			t.Fatalf("dimension %d is incomplete: %+v", id, dimension)
+		}
+		if dimension.MongoDBCpu+dimension.MonitorCpu > dimension.Cpu {
+			t.Fatalf("dimension %d CPU allocation exceeds total", id)
+		}
+		if dimension.MongoDBMemory+dimension.MonitorMemory > dimension.MemoryBytes {
+			t.Fatalf("dimension %d memory allocation exceeds total", id)
+		}
 	}
 	d := Dimension{}
 	got, e := d.ConvertMemoryToBytes("8Gi")
