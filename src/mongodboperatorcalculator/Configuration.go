@@ -52,14 +52,18 @@ type Configuration struct {
 	MongoDBVersions Versions    `json:"mongodbversions"`
 }
 type ConfigurationRequest struct {
-	DBType           string    `json:"dbtype"`
-	Dimension        Dimension `json:"dimension"`
-	LoadType         LoadType  `json:"loadtype"`
-	Connections      int       `json:"connections"`
-	Output           string    `json:"output"`
-	MongoDBVersion   Version   `json:"mongodbversion"`
-	ProviderCostPct  float64   `json:"providercostpct"`
-	MongoDBDedicated bool      `json:"mongodbdedicated"`
+	DBType           string              `json:"dbtype"`
+	Dimension        Dimension           `json:"dimension"`
+	LoadType         LoadType            `json:"loadtype"`
+	Connections      int                 `json:"connections"`
+	Output           string              `json:"output"`
+	MongoDBVersion   Version             `json:"mongodbversion"`
+	ProviderCostPct  float64             `json:"providercostpct"`
+	MongoDBDedicated bool                `json:"mongodbdedicated"`
+	Backup           BackupConfiguration `json:"backup"`
+}
+type BackupConfiguration struct {
+	Enabled bool `json:"enabled"`
 }
 type Parameter struct {
 	Name     string   `json:"name"`

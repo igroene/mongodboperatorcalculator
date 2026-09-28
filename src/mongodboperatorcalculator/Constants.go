@@ -41,7 +41,15 @@ const (
 	ResultOutputFormatHuman = "human"
 
 	// MongoDB documents 50% as a useful upper bound for container-aware cache sizing.
-	WiredTigerCachePct = 0.50
-	RequestPct         = 0.95
-	CloseLimitPct      = 0.85
+	WiredTigerCachePct    = 0.50
+	RequestPct            = 0.95
+	CloseLimitPct         = 0.85
+	PBMAgentCPU           = 300
+	PBMAgentMemory        = 12 * gb / 10
+	PBMAgentRequestCPU    = 300
+	PBMAgentRequestMemory = 1 * gb
+	PMMRequestCPU         = 300
+	PMMLimitCPU           = 400
+	PMMRequestMemory      = 150 * 1000 * 1000
+	PMMLimitMemory        = 256 * 1000 * 1000
 )

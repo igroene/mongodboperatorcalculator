@@ -33,7 +33,13 @@ func TestShardedClusterFamiliesArePerComponent(t *testing.T) {
 			t.Fatalf("missing PMM group %s", group)
 		}
 	}
+	pmmResources := monitor["mongod.resources"].Parameters
+	if pmmResources["request_cpu"].Value != "300m" || pmmResources["limit_cpu"].Value != "400m" ||
+		pmmResources["request_memory"].Value != "150000000" || pmmResources["limit_memory"].Value != "256000000" {
+		t.Fatalf("unexpected PMM resources: %+v", pmmResources)
+	}
 }
+
 func TestNoAutoscaling(t *testing.T) {
 	var conf Configuration
 	conf.Init()
@@ -42,5 +48,24 @@ func TestNoAutoscaling(t *testing.T) {
 	e, msg, _ := c.GetCalculate()
 	if e == nil || msg.MType != OverutilizingI {
 		t.Fatalf("expected overload, got %v %d", e, msg.MType)
+	}
+}
+
+func TestBackupAddsPBMAgentToShardAndConfigServer(t *testing.T) {
+	var conf Configuration
+	conf.Init()
+	var c MongoDBOperatorCalculator
+	c.Init(ConfigurationRequest{
+		DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 4}, LoadType: LoadType{Id: 2},
+		Connections: 500, MongoDBVersion: Version{7, 0, 0}, Backup: BackupConfiguration{Enabled: true},
+	}, conf)
+	if err, _, families := c.GetCalculate(); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, family := range []string{FamilyTypeMongoDB, FamilyTypeConfig} {
+			if _, ok := families[family].Groups["pbm-agent.resources"]; !ok {
+				t.Fatalf("missing PBM resources for %s", family)
+			}
+		}
 	}
 }

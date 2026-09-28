@@ -26,3 +26,43 @@ func TestDedicatedModeOmitsSidecars(t *testing.T) {
 		t.Fatal("monitor should be omitted")
 	}
 }
+
+func TestBackupAddsPBMAgentToReplicaSet(t *testing.T) {
+	var conf Configuration
+	conf.Init()
+	var c MongoDBOperatorCalculator
+	c.Init(ConfigurationRequest{
+		DBType: DbTypeReplicaSet, Dimension: Dimension{Id: 3}, LoadType: LoadType{Id: 2},
+		Connections: 50, MongoDBVersion: Version{7, 0, 0}, Backup: BackupConfiguration{Enabled: true},
+	}, conf)
+	if err, _, families := c.GetCalculate(); err != nil {
+		t.Fatal(err)
+	} else {
+		parameters := families[FamilyTypeMongoDB].Groups["pbm-agent.resources"].Parameters
+		if parameters["request_cpu"].Value != "300m" || parameters["limit_cpu"].Value != "300m" ||
+			parameters["request_memory"].Value != "1073741824" || parameters["limit_memory"].Value != "1288490188" {
+			t.Fatalf("unexpected PBM resources: %+v", parameters)
+		}
+	}
+}
+
+func TestBackupIncreasesCapacityUtilization(t *testing.T) {
+	var conf Configuration
+	conf.Init()
+	without := MongoDBOperatorCalculator{}
+	without.Init(ConfigurationRequest{
+		DBType: DbTypeReplicaSet, Dimension: Dimension{Id: 2}, LoadType: LoadType{Id: 2},
+		Connections: 500, MongoDBVersion: Version{7, 0, 0},
+	}, conf)
+	_, withoutMessage, _ := without.GetCalculate()
+
+	with := MongoDBOperatorCalculator{}
+	with.Init(ConfigurationRequest{
+		DBType: DbTypeReplicaSet, Dimension: Dimension{Id: 2}, LoadType: LoadType{Id: 2},
+		Connections: 500, MongoDBVersion: Version{7, 0, 0}, Backup: BackupConfiguration{Enabled: true},
+	}, conf)
+	_, withMessage, _ := with.GetCalculate()
+	if withoutMessage.MText == withMessage.MText {
+		t.Fatalf("backup should change utilization: without=%q with=%q", withoutMessage.MText, withMessage.MText)
+	}
+}

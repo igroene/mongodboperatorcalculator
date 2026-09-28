@@ -12,7 +12,7 @@ It mirrors the public API shape of the MySQL Operator Calculator while using Mon
 - Per-component sharded output for one shard member, one config-server member, one `mongos`, and PMM.
 - Kubernetes CPU and memory requests, limits, and probes.
 - JSON and operator-oriented human-readable output.
-- No storage sizing, replication tuning, security policy, backup policy, or autoscaling.
+- No storage sizing, replication tuning, backup scheduling, security policy, or autoscaling.
 
 The calculator estimates maximum safe connection-driven throughput. It is not a benchmark and does not guarantee a particular operations-per-second rate. Validate generated values against the target workload before production use.
 
@@ -66,6 +66,7 @@ All calculator inputs are passed as a JSON request to `POST /calculator` or thro
 | `mongodbversion.patch` | integer | Yes | MongoDB patch version. |
 | `providercostpct` | float | No | Fraction of resources reserved for platform overhead. For example, `0.12` reserves 12%. Default is `0`. Must be at least `0` and less than `1`. |
 | `mongodbdedicated` | boolean | No | When `true`, allocate the entire replica-set dimension to `mongod` and omit PMM. Default is `false`. |
+| `backup.enabled` | boolean | No | When `true`, add a PBM agent sidecar to shard and config-server `mongod` pods and include its fixed resource estimate. Default is `false`. |
 
 Custom memory quantities accept binary and decimal-looking suffixes supported by the calculator, including `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, and `TiB`. Values are converted to bytes internally.
 
@@ -77,19 +78,19 @@ Predefined dimensions are per-`mongod` pod profiles. Replica-set results describ
 
 | ID | Name | Total CPU | Total Memory | PMM CPU | PMM Memory |
 |---:|---|---:|---:|---:|---:|
-| `1` | XSmall | `600m` | `1Gi` | `100m` | `128Mi` |
-| `2` | Small | `800m` | `2Gi` | `100m` | `128Mi` |
-| `3` | Medium | `1000m` | `4Gi` | `200m` | `256Mi` |
-| `4` | Large | `2000m` | `8Gi` | `300m` | `512Mi` |
-| `5` | XLarge | `4000m` | `16Gi` | `400m` | `512Mi` |
-| `6` | 2XLarge | `8000m` | `32Gi` | `500m` | `1Gi` |
-| `7` | 4XLarge | `16000m` | `64Gi` | `1000m` | `1Gi` |
-| `8` | 8XLarge | `32000m` | `128Gi` | `1000m` | `1Gi` |
-| `9` | 12XLarge | `64000m` | `256Gi` | `1500m` | `2Gi` |
-| `10` | 16XLarge | `128000m` | `512Gi` | `2000m` | `2Gi` |
+| `1` | XSmall | `600m` | `1Gi` | `300m` | `150M` |
+| `2` | Small | `800m` | `2Gi` | `300m` | `150M` |
+| `3` | Medium | `1000m` | `4Gi` | `300m` | `150M` |
+| `4` | Large | `2000m` | `8Gi` | `300m` | `150M` |
+| `5` | XLarge | `4000m` | `16Gi` | `300m` | `150M` |
+| `6` | 2XLarge | `8000m` | `32Gi` | `300m` | `150M` |
+| `7` | 4XLarge | `16000m` | `64Gi` | `300m` | `150M` |
+| `8` | 8XLarge | `32000m` | `128Gi` | `300m` | `150M` |
+| `9` | 12XLarge | `64000m` | `256Gi` | `300m` | `150M` |
+| `10` | 16XLarge | `128000m` | `512Gi` | `300m` | `150M` |
 | `999` | Open request by resources | User supplied | User supplied |
 
-The dimension catalog intentionally includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads. Every predefined dimension reserves an explicit PMM CPU and memory allocation; the remaining resources are assigned to `mongod` for replica-set results.
+The dimension catalog intentionally includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads. PMM output uses fixed `300m` CPU and `150M` memory requests with `400m` CPU and `256M` memory limits; the dimension's PMM fields are retained as catalog metadata. The remaining resources are assigned to `mongod` for replica-set results.
 
 ## Workload Types
 
@@ -112,6 +113,7 @@ Set `mongodbdedicated` to `true` when the pod contains only `mongod`:
   "dimension": {"id": 2},
   "loadtype": {"id": 1},
   "connections": 100,
+  "backup": {"enabled": false},
   "mongodbversion": {"major": 7, "minor": 0, "patch": 0},
   "mongodbdedicated": true
 }
@@ -132,6 +134,7 @@ Dedicated mode:
 - Config-server profile: `max(500m, mongod CPU × 0.25)` and `max(1Gi, mongod memory × 0.25)`.
 - `mongos` profile: `max(500m, mongod CPU × 0.10)` and `max(512Mi, mongod memory × 0.10)`.
 - PMM sidecars are emitted for shard `mongod`, config-server `mongod`, and `mongos` in sharded deployments.
+- When backup is enabled, each shard and config-server `mongod` receives a PBM agent sidecar with a `300m` CPU request and limit, a `1Gi` memory request, and a `1.2Gi` memory limit. PBM resources are included in shard `mongod` capacity utilization.
 - The remaining memory within each `mongod` pod is reserved for filesystem cache, connections, active operations, process overhead, and safety margin.
 - CPU pressure is estimated from connections and workload profile.
 - `mongos` does not receive a WiredTiger cache allocation.
@@ -632,7 +635,7 @@ The public `Init()` signature is intentionally compatible with the MySQL calcula
 | `mongos` | One sharded-cluster query router. |
 | `monitor` | PMM Client sidecar resources. |
 
-The calculator does not generate authentication, TLS, read concern, write concern, replication, storage, or backup policy. Configure those separately in the Percona Operator custom resource and application.
+The calculator does not generate authentication, TLS, read concern, write concern, replication, storage, or backup scheduling policy. Configure those separately in the Percona Operator custom resource and application. When `backup.enabled` is true, it does include the PBM agent sidecar resource estimate.
 
 ## Verification
 

@@ -74,11 +74,18 @@ func (c *Configurator) sizeMongo(name string, cpu int, mem float64) {
 	conn := float64(c.request.Connections) * connectionMemory(c.request.LoadType.Id)
 	c.memoryUsed = cache + conn + mem*0.15
 	c.cpuUsed = float64(c.request.Connections) * connectionCPU(c.request.LoadType.Id)
+	if c.request.Backup.Enabled {
+		c.memoryUsed += PBMAgentMemory
+		c.cpuUsed += PBMAgentCPU
+	}
 	f := c.families[name]
 	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", formatGB(cache))
 	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
 	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
 	c.setResources(f, cpu, mem)
+	if c.request.Backup.Enabled {
+		c.setPBMAgentResources(f)
+	}
 	c.setProbes(f)
 	c.families[name] = f
 }
@@ -103,6 +110,9 @@ func (c *Configurator) sizeMongoRole(name string, cpu int, mem float64) {
 	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
 	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
 	c.setResources(f, cpu, mem)
+	if c.request.Backup.Enabled {
+		c.setPBMAgentResources(f)
+	}
 	c.setProbes(f)
 	c.families[name] = f
 }
@@ -116,14 +126,8 @@ func (c *Configurator) sizeRole(name string, cpu int, mem float64, router bool) 
 	c.families[name] = f
 }
 func (c *Configurator) sizeMonitor(name string, cpu int, mem float64) {
-	if cpu == 0 {
-		cpu = 200
-	}
-	if mem == 0 {
-		mem = 256 * 1024 * 1024
-	}
 	f := c.families[name]
-	c.setResources(f, cpu, mem)
+	c.setPMMResources(f)
 	c.setProbes(f)
 	c.families[name] = f
 }
@@ -134,10 +138,7 @@ func (c *Configurator) sizeMonitorComponent(component string, cpu int, mem float
 		f.Groups[key] = GroupObj{Name: key, Parameters: map[string]Parameter{}}
 	}
 	resources := f.Groups[component+"."+GroupNameResources]
-	putGroup(&resources, "request_cpu", fmt.Sprintf("%dm", int(float64(cpu)*RequestPct)))
-	putGroup(&resources, "limit_cpu", fmt.Sprintf("%dm", cpu))
-	putGroup(&resources, "request_memory", strconv.FormatInt(int64(mem*RequestPct), 10))
-	putGroup(&resources, "limit_memory", strconv.FormatInt(int64(mem), 10))
+	setPMMResourceValues(&resources)
 	f.Groups[resources.Name] = resources
 	readiness := f.Groups[component+"."+GroupNameReadinessProbe]
 	liveness := f.Groups[component+"."+GroupNameLivenessProbe]
@@ -153,6 +154,25 @@ func (c *Configurator) setResources(f Family, cpu int, mem float64) {
 	put(f, GroupNameResources, "limit_cpu", fmt.Sprintf("%dm", cpu))
 	put(f, GroupNameResources, "request_memory", strconv.FormatInt(int64(mem*RequestPct), 10))
 	put(f, GroupNameResources, "limit_memory", strconv.FormatInt(int64(mem), 10))
+}
+func (c *Configurator) setPMMResources(f Family) {
+	resources := f.Groups[GroupNameResources]
+	setPMMResourceValues(&resources)
+	f.Groups[resources.Name] = resources
+}
+func setPMMResourceValues(resources *GroupObj) {
+	putGroup(resources, "request_cpu", fmt.Sprintf("%dm", PMMRequestCPU))
+	putGroup(resources, "limit_cpu", fmt.Sprintf("%dm", PMMLimitCPU))
+	putGroup(resources, "request_memory", strconv.Itoa(PMMRequestMemory))
+	putGroup(resources, "limit_memory", strconv.Itoa(PMMLimitMemory))
+}
+func (c *Configurator) setPBMAgentResources(f Family) {
+	group := GroupObj{Name: "pbm-agent.resources", Parameters: map[string]Parameter{}}
+	putGroup(&group, "request_cpu", fmt.Sprintf("%dm", PBMAgentRequestCPU))
+	putGroup(&group, "limit_cpu", fmt.Sprintf("%dm", PBMAgentCPU))
+	putGroup(&group, "request_memory", strconv.FormatInt(int64(PBMAgentRequestMemory), 10))
+	putGroup(&group, "limit_memory", strconv.FormatInt(int64(PBMAgentMemory), 10))
+	f.Groups[group.Name] = group
 }
 func (c *Configurator) setProbes(f Family) {
 	factor := 1 + float64(c.request.Connections)/1000
