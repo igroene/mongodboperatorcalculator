@@ -10,6 +10,7 @@ It mirrors the public API shape of the MySQL Operator Calculator while using Mon
 - Replica sets and sharded clusters.
 - One `mongod` member per result; no replica-set member count is assumed.
 - Per-component sharded output for one shard member, one config-server member, one `mongos`, and PMM.
+- Optional PBM agent resources for shard and config-server `mongod` pods when backup is enabled.
 - Kubernetes CPU and memory requests, limits, and probes.
 - JSON and operator-oriented human-readable output.
 - No storage sizing, replication tuning, backup scheduling, security policy, or autoscaling.
@@ -56,7 +57,7 @@ All calculator inputs are passed as a JSON request to `POST /calculator` or thro
 |---|---|---:|---|
 | `output` | string | Yes | `json` for structured output or `human` for operator-oriented text. Any value other than `human` uses JSON output. |
 | `dbtype` | string | Yes | `replica_set` or `sharded_cluster`. |
-| `dimension.id` | integer | Yes | Predefined dimension ID `1` through `4`, or `999` for explicit resources. Dimension `998` is not supported. |
+| `dimension.id` | integer | Yes | Predefined dimension ID `1` through `10`, or `999` for explicit resources. Dimension `998` is not supported. |
 | `dimension.cpu` | integer | Conditional | Total CPU in millicores for dimension `999`; for example, `4000` is four CPU cores. |
 | `dimension.memory` | string | Conditional | Total memory for dimension `999`; examples include `8Gi`, `16GB`, and `4096Mi`. |
 | `loadtype.id` | integer | Yes | Workload profile `1` through `4`. |
@@ -78,19 +79,19 @@ Predefined dimensions are per-`mongod` pod profiles. Replica-set results describ
 
 | ID | Name | Total CPU | Total Memory | PMM CPU | PMM Memory |
 |---:|---|---:|---:|---:|---:|
-| `1` | XSmall | `600m` | `1Gi` | `300m` | `150M` |
-| `2` | Small | `800m` | `2Gi` | `300m` | `150M` |
-| `3` | Medium | `1000m` | `4Gi` | `300m` | `150M` |
-| `4` | Large | `2000m` | `8Gi` | `300m` | `150M` |
-| `5` | XLarge | `4000m` | `16Gi` | `300m` | `150M` |
-| `6` | 2XLarge | `8000m` | `32Gi` | `300m` | `150M` |
-| `7` | 4XLarge | `16000m` | `64Gi` | `300m` | `150M` |
-| `8` | 8XLarge | `32000m` | `128Gi` | `300m` | `150M` |
-| `9` | 12XLarge | `64000m` | `256Gi` | `300m` | `150M` |
-| `10` | 16XLarge | `128000m` | `512Gi` | `300m` | `150M` |
+| `1` | XSmall | `600m` | `1Gi` | `100m` | `128Mi` |
+| `2` | Small | `800m` | `2Gi` | `100m` | `128Mi` |
+| `3` | Medium | `1000m` | `4Gi` | `200m` | `256Mi` |
+| `4` | Large | `2000m` | `8Gi` | `300m` | `512Mi` |
+| `5` | XLarge | `4000m` | `16Gi` | `400m` | `512Mi` |
+| `6` | 2XLarge | `8000m` | `32Gi` | `500m` | `1Gi` |
+| `7` | 4XLarge | `16000m` | `64Gi` | `1000m` | `1Gi` |
+| `8` | 8XLarge | `32000m` | `128Gi` | `1000m` | `1Gi` |
+| `9` | 12XLarge | `64000m` | `256Gi` | `1500m` | `2Gi` |
+| `10` | 16XLarge | `128000m` | `512Gi` | `2000m` | `2Gi` |
 | `999` | Open request by resources | User supplied | User supplied |
 
-The dimension catalog intentionally includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads. PMM output uses fixed `300m` CPU and `150M` memory requests with `400m` CPU and `256M` memory limits; the dimension's PMM fields are retained as catalog metadata. The remaining resources are assigned to `mongod` for replica-set results.
+The dimension catalog intentionally includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads. The PMM fields in this table are catalog metadata; emitted PMM resources use fixed `300m` CPU and `150M` memory requests with `400m` CPU and `256M` memory limits. The remaining resources are assigned to `mongod` for replica-set results.
 
 ## Workload Types
 
@@ -105,7 +106,7 @@ Workload profiles affect conservative CPU and connection-memory estimates. They 
 
 ## Dedicated Mode
 
-Set `mongodbdedicated` to `true` when the pod contains only `mongod`:
+Set `mongodbdedicated` to `true` when PMM should be omitted from a replica-set pod. If backup is enabled, PBM is still emitted because it runs alongside `mongod`:
 
 ```json
 {
@@ -134,11 +135,12 @@ Dedicated mode:
 - Config-server profile: `max(500m, mongod CPU × 0.25)` and `max(1Gi, mongod memory × 0.25)`.
 - `mongos` profile: `max(500m, mongod CPU × 0.10)` and `max(512Mi, mongod memory × 0.10)`.
 - PMM sidecars are emitted for shard `mongod`, config-server `mongod`, and `mongos` in sharded deployments.
+- PMM resources are fixed at `300m` CPU request, `400m` CPU limit, `150M` memory request, and `256M` memory limit. These values apply to every emitted PMM component.
 - When backup is enabled, each shard and config-server `mongod` receives a PBM agent sidecar with a `300m` CPU request and limit, a `1Gi` memory request, and a `1.2Gi` memory limit. PBM resources are included in shard `mongod` capacity utilization.
 - The remaining memory within each `mongod` pod is reserved for filesystem cache, connections, active operations, process overhead, and safety margin.
 - CPU pressure is estimated from connections and workload profile.
 - `mongos` does not receive a WiredTiger cache allocation.
-- Kubernetes requests are calculated as 95% of the corresponding limits.
+- MongoDB, config-server, and `mongos` requests are calculated as 95% of their corresponding limits. PMM and PBM use the explicit fixed request values documented above.
 - A valid request exceeding safe capacity returns message type `3001`, HTTP `422`, and an empty `answer` object.
 - A request within the safety envelope returns message type `1001` or `2001`.
 
@@ -188,6 +190,7 @@ Calculated configuration families. Each family contains groups, and each group c
 | `resources` | Kubernetes CPU and memory requests and limits. |
 | `readinessProbe` | Readiness probe settings. |
 | `livenessProbe` | Liveness probe settings. |
+| `pbm-agent.resources` | PBM agent CPU and memory requests and limits when `backup.enabled` is `true`; emitted under `mongodb` and `configserver`. |
 
 Output units are parameter-specific: resource memory values are bytes, CPU values are Kubernetes millicores, WiredTiger cache is GB, and connection limits are integers.
 
@@ -335,10 +338,10 @@ Expected output:
         "resources": {
           "name": "resources",
           "parameters": {
-            "limit_cpu": {"name": "limit_cpu", "value": "100m"},
-            "limit_memory": {"name": "limit_memory", "value": "134217728"},
-            "request_cpu": {"name": "request_cpu", "value": "95m"},
-            "request_memory": {"name": "request_memory", "value": "127506841"}
+            "limit_cpu": {"name": "limit_cpu", "value": "400m"},
+            "limit_memory": {"name": "limit_memory", "value": "256000000"},
+            "request_cpu": {"name": "request_cpu", "value": "300m"},
+            "request_memory": {"name": "request_memory", "value": "150000000"}
           }
         }
       }
@@ -413,13 +416,13 @@ Expected output families and representative values. Every component is an indepe
     "monitor": {
       "name": "pmm-client",
       "groups": {
-        "mongod.resources": {"name": "mongod.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "200m"}, "limit_memory": {"name": "limit_memory", "value": "268435456"}, "request_cpu": {"name": "request_cpu", "value": "190m"}, "request_memory": {"name": "request_memory", "value": "255013683"}}},
+        "mongod.resources": {"name": "mongod.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
         "mongod.readinessProbe": {"name": "mongod.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
         "mongod.livenessProbe": {"name": "mongod.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "configserver.resources": {"name": "configserver.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "1073741824"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "1020054732"}}},
+        "configserver.resources": {"name": "configserver.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
         "configserver.readinessProbe": {"name": "configserver.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
         "configserver.livenessProbe": {"name": "configserver.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "mongos.resources": {"name": "mongos.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "536870912"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "510027366"}}},
+        "mongos.resources": {"name": "mongos.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
         "mongos.readinessProbe": {"name": "mongos.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
         "mongos.livenessProbe": {"name": "mongos.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}}
       }
@@ -532,13 +535,26 @@ timeoutSeconds = 23
 timeoutSeconds = 45
 
 [pmm-client.resources]
-limit_cpu = 100m
-limit_memory = 134217728
-request_cpu = 95m
-request_memory = 127506841
+limit_cpu = 400m
+limit_memory = 256000000
+request_cpu = 300m
+request_memory = 150000000
+
 ```
 
-Sharded output uses `mongod`, `configserver.mongod`, `mongos`, and component-specific PMM sections such as `pmm-client.mongod.resources`, `pmm-client.configserver.resources`, and `pmm-client.mongos.resources`. Values are sorted deterministically.
+Sharded output uses `mongod`, `configserver.mongod`, `mongos`, and component-specific PMM sections such as `pmm-client.mongod.resources`, `pmm-client.configserver.resources`, and `pmm-client.mongos.resources`. When backup is enabled, it also includes `mongod.pbm-agent.resources` and `configserver.mongod.pbm-agent.resources`. Values are sorted deterministically.
+
+When `backup.enabled` is `true`, the relevant human-readable output includes:
+
+```ini
+[mongod.pbm-agent.resources]
+limit_cpu = 300m
+limit_memory = 1288490188
+request_cpu = 300m
+request_memory = 1073741824
+```
+
+For a sharded cluster, the corresponding config-server section is `[configserver.mongod.pbm-agent.resources]`.
 
 ## Using as a Go Module
 
