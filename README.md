@@ -10,8 +10,8 @@ It mirrors the public API shape of the MySQL Operator Calculator while using Mon
 - Replica sets and sharded clusters.
 - One `mongod` member per result; no replica-set member count is assumed.
 - Per-component sharded output for one shard member, one config-server member, one `mongos`, and PMM.
-- Optional PBM agent resources for shard and config-server `mongod` pods when backup is enabled.
-- Kubernetes CPU and memory requests, limits, and probes.
+- PMM Client and optional PBM agent sidecars, sized with the Percona Operator defaults and taken out of the pod budget.
+- Kubernetes CPU and memory requests, limits, and probes, with optional Guaranteed QoS.
 - JSON and operator-oriented human-readable output.
 - No storage sizing, replication tuning, backup scheduling, security policy, or autoscaling.
 
@@ -22,6 +22,7 @@ The calculator estimates maximum safe connection-driven throughput. It is not a 
 ```bash
 git clone https://github.com/igroene/mongodboperatorcalculator.git
 cd mongodboperatorcalculator
+go build -o mongodboperatorcalculator ./src
 ./mongodboperatorcalculator
 ```
 
@@ -31,13 +32,15 @@ The default server address is `0.0.0.0:8080`.
 ./mongodboperatorcalculator -address=127.0.0.1 -port=8080 -loglevel=INFO
 ```
 
+The server stops gracefully on `SIGINT` and `SIGTERM`, so it can run as a Kubernetes Deployment. Use `GET /healthz` for liveness and readiness probes.
+
 ## Command-Line Flags
 
 | Flag | Default | Description |
 |---|---:|---|
 | `-address` | `0.0.0.0` | IP address or hostname to bind to. |
 | `-port` | `8080` | TCP port to listen on. |
-| `-loglevel` | `INFO` | Log level: `ERROR`, `INFO`, or `DEBUG`. Unknown values fall back to `INFO`. |
+| `-loglevel` | `INFO` | Log level: `ERROR`, `INFO`, or `DEBUG`. Unknown values fall back to `INFO`. `DEBUG` logs every calculation result. |
 | `-version` | `false` | Print the calculator version and exit. |
 | `-help` | `false` | Print command-line usage and exit. The standard Go `flag` package also accepts `-h`. |
 
@@ -51,98 +54,159 @@ Examples:
 
 ## Input Parameters
 
-All calculator inputs are passed as a JSON request to `POST /calculator` or through the Go module API.
+All calculator inputs are passed as a JSON request to `POST /calculator` or through the Go module API. The HTTP API rejects unknown fields and trailing data after the JSON object.
 
 | Parameter | Type | Required | Description |
 |---|---|---:|---|
-| `output` | string | Yes | `json` for structured output or `human` for operator-oriented text. Any value other than `human` uses JSON output. |
+| `output` | string | No | `json` (default) or `human`. Any other value is rejected. |
 | `dbtype` | string | Yes | `replica_set` or `sharded_cluster`. |
 | `dimension.id` | integer | Yes | Predefined dimension ID `1` through `10`, or `999` for explicit resources. Dimension `998` is not supported. |
-| `dimension.cpu` | integer | Conditional | Total CPU in millicores for dimension `999`; for example, `4000` is four CPU cores. |
-| `dimension.memory` | string | Conditional | Total memory for dimension `999`; examples include `8Gi`, `16GB`, and `4096Mi`. |
+| `dimension.cpu` | integer | Conditional | Total pod CPU in millicores for dimension `999`, from `1` to `512000`. For predefined dimensions it may be omitted or must match the catalog value. |
+| `dimension.memory` | string | Conditional | Total pod memory for dimension `999`, for example `8Gi`, `8G`, `4096Mi`, or `8589934592`. For predefined dimensions it may be omitted or must match the catalog value. |
 | `loadtype.id` | integer | Yes | Workload profile `1` through `4`. |
-| `connections` | integer | Yes | Target concurrent connection count. Must be greater than zero. There is no automatic backoff or autoscaling. |
+| `connections` | integer | Yes | Target concurrent client connections, from `1` to `1000000`. For sharded clusters this is the total across all `mongos`. |
 | `mongodbversion.major` | integer | Yes | Supported major version: `7` or `8`. |
-| `mongodbversion.minor` | integer | Yes | MongoDB minor version. |
-| `mongodbversion.patch` | integer | Yes | MongoDB patch version. |
-| `providercostpct` | float | No | Fraction of resources reserved for platform overhead. For example, `0.12` reserves 12%. Default is `0`. Must be at least `0` and less than `1`. |
-| `mongodbdedicated` | boolean | No | When `true`, allocate the entire replica-set dimension to `mongod` and omit PMM. Default is `false`. |
-| `backup.enabled` | boolean | No | When `true`, add a PBM agent sidecar to shard and config-server `mongod` pods and include its fixed resource estimate. Default is `false`. |
+| `mongodbversion.minor` | integer | Yes | MongoDB minor version, `0` to `99`. |
+| `mongodbversion.patch` | integer | Yes | MongoDB patch version, `0` to `99`. |
+| `providercostpct` | float | No | Fraction of the dimension reserved for platform overhead. For example, `0.12` reserves 12%. Default is `0`. Must be at least `0` and less than `1`. |
+| `mongodbdedicated` | boolean | No | When `true`, omit PMM so `mongod` gets the whole pod budget except PBM. Valid only for `replica_set`. Default is `false`. |
+| `backup.enabled` | boolean | No | When `true`, add a PBM agent sidecar to shard and config-server `mongod` pods. Default is `false`. |
+| `guaranteedqos` | boolean | No | When `true`, every container gets requests equal to limits (Kubernetes Guaranteed QoS). Default is `false`. |
+| `mongos.count` | integer | No | Number of `mongos` pods sharing the client connections, `1` to `100`. Valid only for `sharded_cluster`. Default is `3`, the operator default. |
 
-Custom memory quantities accept binary and decimal-looking suffixes supported by the calculator, including `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, and `TiB`. Values are converted to bytes internally.
+The MongoDB version is validated against the supported range (`7.0.0` to `8.99.99`). It does not change the generated values yet.
 
-Invalid requests return message type `5001` and HTTP status `400`. `connections: 0` is invalid. The calculator does not implement the MySQL calculator's connection-driven dimension `998`, automatic connection discovery, connection backoff, or dimension scaling.
+### Memory Quantities
+
+Memory follows Kubernetes quantity rules. Suffixes are case-insensitive, except that a lowercase `m` is rejected because Kubernetes reads it as milli.
+
+| Suffix | Meaning |
+|---|---|
+| none, `B` | Bytes |
+| `Ki`, `Mi`, `Gi`, `Ti`, `Pi` (also `KiB`, `MiB`, `GiB`, `TiB`, `PiB`) | Binary: powers of 1024 |
+| `k`, `M`, `G`, `T`, `P` (also `KB`, `MB`, `GB`, `TB`, `PB`) | Decimal: powers of 1000 |
+
+So `8Gi` is 8,589,934,592 bytes and `8G` or `8GB` is 8,000,000,000 bytes. Exponents, hexadecimal, negative values, `NaN`, and `Inf` are rejected. Memory must be greater than zero and at most `16Ti`.
+
+Invalid requests return message type `5001` and HTTP status `400`. When a request is invalid, `incoming` echoes it back unchanged.
 
 ## Supported Dimensions
 
-Predefined dimensions are per-`mongod` pod profiles. Replica-set results describe one `mongod` member plus PMM. Sharded results use the same profile independently for each shard `mongod` pod; config-server and `mongos` pods receive separate derived profiles and their resources are not deducted from the shard profile.
+A dimension is the total CPU and memory of one shard or replica-set `mongod` pod. The `mongod` container and its sidecars share that budget. `providercostpct` is taken off first, then the sidecar limits:
 
-| ID | Name | Total CPU | Total Memory | PMM CPU | PMM Memory |
-|---:|---|---:|---:|---:|---:|
-| `1` | XSmall | `600m` | `1Gi` | `100m` | `128Mi` |
-| `2` | Small | `800m` | `2Gi` | `100m` | `128Mi` |
-| `3` | Medium | `1000m` | `4Gi` | `200m` | `256Mi` |
-| `4` | Large | `2000m` | `8Gi` | `300m` | `512Mi` |
-| `5` | XLarge | `4000m` | `16Gi` | `400m` | `512Mi` |
-| `6` | 2XLarge | `8000m` | `32Gi` | `500m` | `1Gi` |
-| `7` | 4XLarge | `16000m` | `64Gi` | `1000m` | `1Gi` |
-| `8` | 8XLarge | `32000m` | `128Gi` | `1000m` | `1Gi` |
-| `9` | 12XLarge | `64000m` | `256Gi` | `1500m` | `2Gi` |
-| `10` | 16XLarge | `128000m` | `512Gi` | `2000m` | `2Gi` |
-| `999` | Open request by resources | User supplied | User supplied |
+| Sidecar | When | CPU request / limit | Memory request / limit |
+|---|---|---:|---:|
+| PMM Client | Unless `mongodbdedicated` is `true` | `300m` / `400m` | `150M` / `256M` |
+| PBM agent | When `backup.enabled` is `true` | `300m` / `300m` | `1Gi` / `1.2Gi` |
 
-The dimension catalog intentionally includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads. The PMM fields in this table are catalog metadata; emitted PMM resources use fixed `300m` CPU and `150M` memory requests with `400m` CPU and `256M` memory limits. The remaining resources are assigned to `mongod` for replica-set results.
+These are the Percona Operator for MongoDB defaults. Whatever is left goes to `mongod`, rounded down to a whole MiB. If `mongod` would get less than `250m` CPU or `512Mi` memory, the request returns message type `3001` with an explanation.
+
+| ID | Name | Total CPU | Total Memory | Notes |
+|---:|---|---:|---:|---|
+| `1` | XSmall | `600m` | `1Gi` | Only fits with `mongodbdedicated` and no backup. |
+| `2` | Small | `800m` | `2Gi` | Fits PMM or PBM, not both. |
+| `3` | Medium | `1000m` | `4Gi` | |
+| `4` | Large | `2000m` | `8Gi` | |
+| `5` | XLarge | `4000m` | `16Gi` | |
+| `6` | 2XLarge | `8000m` | `32Gi` | |
+| `7` | 4XLarge | `16000m` | `64Gi` | |
+| `8` | 8XLarge | `32000m` | `128Gi` | |
+| `9` | 12XLarge | `64000m` | `256Gi` | |
+| `10` | 16XLarge | `128000m` | `512Gi` | |
+| `999` | Open request by resources | User supplied | User supplied | Same pod budget rules. |
+
+The catalog includes small development profiles below MongoDB's general production recommendation of two real CPU cores. Use larger profiles for production workloads.
+
+Config-server and `mongos` pods are not part of the dimension. They are sized separately, and their sidecars are added on top of the sizes shown.
 
 ## Workload Types
 
-| ID | Name | Description |
-|---:|---|---|
-| `1` | Mainly Reads | Read-heavy workload. |
-| `2` | Light OLTP | Mixed workload with moderate writes. |
-| `3` | Heavy OLTP | Highly concurrent mixed workload. |
-| `4` | Mainly Writes | Write-heavy workload. |
+| ID | Name | Description | CPU per connection | Working memory per connection |
+|---:|---|---|---:|---:|
+| `1` | Mainly Reads | Read-heavy workload. | `0.5m` | `0.25Mi` |
+| `2` | Light OLTP | Mixed workload with moderate writes. | `1m` | `0.5Mi` |
+| `3` | Heavy OLTP | Highly concurrent mixed workload. | `2m` | `1Mi` |
+| `4` | Mainly Writes | Write-heavy workload. | `3m` | `1.5Mi` |
 
-Workload profiles affect conservative CPU and connection-memory estimates. They do not change replication, read concern, write concern, authentication, TLS, or storage settings.
+Every connection also counts `1Mi` for its thread stack. Workload profiles affect the CPU and memory estimates. They do not change replication, read concern, write concern, authentication, TLS, or storage settings.
 
 ## Dedicated Mode
 
-Set `mongodbdedicated` to `true` when PMM should be omitted from a replica-set pod. If backup is enabled, PBM is still emitted because it runs alongside `mongod`:
-
-```json
-{
-  "dbtype": "replica_set",
-  "dimension": {"id": 2},
-  "loadtype": {"id": 1},
-  "connections": 100,
-  "backup": {"enabled": false},
-  "mongodbversion": {"major": 7, "minor": 0, "patch": 0},
-  "mongodbdedicated": true
-}
-```
+Set `mongodbdedicated` to `true` when PMM should be omitted from a replica-set pod. If backup is enabled, PBM is still emitted and still taken out of the pod budget, because it runs alongside `mongod`.
 
 Dedicated mode:
 
-- Allocates the complete dimension to `mongod`.
+- Gives `mongod` the whole dimension, minus PBM when backup is enabled.
 - Omits the `monitor` family.
-- Is valid only for `replica_set`.
-- Keeps WiredTiger cache at 50% of the `mongod` memory limit.
-- Rejects dedicated `sharded_cluster` requests.
+- Is valid only for `replica_set`. Dedicated `sharded_cluster` requests are rejected.
+- Keeps the WiredTiger cache at 50% of the `mongod` memory limit.
 
 ## Sizing Rules
 
-- WiredTiger cache is always `50%` of the `mongod` pod memory limit.
-- The shard `mongod` uses the full selected `mongod` CPU and memory profile. Config-server and `mongos` resources are separate pod recommendations.
-- Config-server profile: `max(500m, mongod CPU × 0.25)` and `max(1Gi, mongod memory × 0.25)`.
-- `mongos` profile: `max(500m, mongod CPU × 0.10)` and `max(512Mi, mongod memory × 0.10)`.
-- PMM sidecars are emitted for shard `mongod`, config-server `mongod`, and `mongos` in sharded deployments.
-- PMM resources are fixed at `300m` CPU request, `400m` CPU limit, `150M` memory request, and `256M` memory limit. These values apply to every emitted PMM component.
-- When backup is enabled, each shard and config-server `mongod` receives a PBM agent sidecar with a `300m` CPU request and limit, a `1Gi` memory request, and a `1.2Gi` memory limit. PBM resources are included in shard `mongod` capacity utilization.
-- The remaining memory within each `mongod` pod is reserved for filesystem cache, connections, active operations, process overhead, and safety margin.
-- CPU pressure is estimated from connections and workload profile.
-- `mongos` does not receive a WiredTiger cache allocation.
-- MongoDB, config-server, and `mongos` requests are calculated as 95% of their corresponding limits. PMM and PBM use the explicit fixed request values documented above.
-- A valid request exceeding safe capacity returns message type `3001`, HTTP `422`, and an empty `answer` object.
-- A request within the safety envelope returns message type `1001` or `2001`.
+### Shard and replica-set `mongod`
+
+- Resources: the dimension minus `providercostpct` and the sidecar limits (see [Supported Dimensions](#supported-dimensions)).
+- WiredTiger cache: `50%` of the `mongod` memory limit, never below the MongoDB minimum of `0.25` GB. It is rounded down to two decimals and expressed in binary GB, as `cacheSizeGB` expects.
+- `net.maxIncomingConnections`: `ceil(connections × 1.15) + 100`. The fixed `100` covers replica-set members, operator health checks, PMM, PBM, and admin sessions. In sharded clusters the shard also adds `10` pool connections per `mongos`. Client connections still count in full, because every client operation can reach the same shard through `mongos`.
+
+### Config server
+
+A config server's load depends on cluster metadata and on how many `mongos` and shard members talk to it, not on shard size. It uses the smallest of these tiers that keeps estimated utilization at or below 85%:
+
+| Tier | CPU | Memory |
+|---:|---:|---:|
+| 1 | `1000m` | `2Gi` |
+| 2 | `2000m` | `4Gi` |
+| 3 | `4000m` | `8Gi` |
+| 4 | `8000m` | `16Gi` |
+
+Shards with a `mongod` memory limit of `32Gi` or more start at tier 2, since they usually carry more chunk metadata. The config-server load is `20` connections per `mongos` with the Mainly Reads profile. `net.maxIncomingConnections` is `ceil(mongos.count × 20 × 1.15) + 100`.
+
+### `mongos`
+
+Each `mongos` handles `ceil(connections / mongos.count)` client connections. It is sized so its estimated load sits at 70% of its limits:
+
+- CPU: `100m + connections × CPU per connection × 0.5`, rounded up to `100m`, from `500m` to `16000m`.
+- Memory: `256Mi + connections × (1Mi + working memory per connection × 0.5)`, rounded up to `64Mi`, from `512Mi` to `32Gi`.
+- `net.maxIncomingConnections`: `ceil(connections per mongos × 1.15) + 100`.
+- No WiredTiger cache.
+
+If even the largest `mongos` cannot handle its share, the request is rejected with a hint to increase `mongos.count`.
+
+### Requests and limits
+
+- By default, `mongod`, config-server, and `mongos` requests are 95% of their limits, rounded down to whole millicores and MiB. PMM and PBM use the fixed operator default requests listed above.
+- With `guaranteedqos: true`, every container, sidecars included, gets requests equal to limits.
+- PMM memory is emitted in decimal bytes (`256000000`), matching the operator default of `256M`. Every other memory value is a whole number of MiB.
+
+### Probes
+
+Probe values follow the Percona Operator defaults and do not depend on connection count:
+
+| Container | Probe | initialDelaySeconds | timeoutSeconds | periodSeconds | failureThreshold | Other |
+|---|---|---:|---:|---:|---:|---|
+| `mongod`, config server, `mongos` | liveness | `60` | `10` | `30` | `4` | `startupDelaySeconds: 7200` |
+| Replica-set and shard `mongod` | readiness | `10` | `2` | `3` | `8` | `successThreshold: 1` |
+| Config server, `mongos` | readiness | `10` | `2` | `3` | `3` | `successThreshold: 1` |
+| PMM Client | liveness | `60` | `5` | `10` | `5` | |
+| PMM Client | readiness | `5` | `1` | `10` | `3` | `successThreshold: 1` |
+
+## Capacity Model
+
+Every component gets a CPU and a memory utilization estimate. The reported figure is the larger of the two.
+
+- **CPU:** `100m + connections × CPU per connection`, divided by the CPU limit.
+- **Memory:** the WiredTiger cache is an allocation, not load, so memory is measured against what is left outside the cache. The estimate is `128Mi + 5% of the memory limit + connections × (1Mi + working memory per connection)`, divided by `memory limit − cache`.
+
+The headline utilization is the shard or replica-set `mongod` estimate. `mongos` and the config server are sized by the calculator, so they only count toward the headline once even their largest size is above 85%. Sharded results list all three components in the message text.
+
+| Utilization | Message type | HTTP status |
+|---|---:|---:|
+| Up to 85% | `1001` | `200` |
+| Above 85%, up to 100% | `2001` | `200` |
+| Above 100%, or `mongod` below its minimum | `3001` | `422` |
+
+A `3001` response has an empty `answer` object. The message text names each overloaded component.
 
 ## Output Structure
 
@@ -171,7 +235,17 @@ Diagnostic status information:
 
 ### `incoming`
 
-The resolved request, including the selected dimension, component resource allocation, normalized workload type, and MongoDB version.
+The resolved request. On success or overload, `dimension` contains the requested totals (`cpu`, `memory`) plus the calculated allocation:
+
+| Field | Meaning |
+|---|---|
+| `mongodbCpu`, `mongodbMemory` | Shard or replica-set `mongod` container limits. |
+| `monitorCpu`, `monitorMemory` | PMM Client limits taken out of the `mongod` pod. `0` in dedicated mode. |
+| `backupCpu`, `backupMemory` | PBM agent limits taken out of the `mongod` pod. `0` without backup. |
+| `configCpu`, `configMemory` | Config-server `mongod` container limits (separate pod). |
+| `mongosCpu`, `mongosMemory` | `mongos` container limits (separate pod). |
+
+Memory allocations are bytes and CPU allocations are millicores. For invalid requests, `incoming` is the request exactly as received.
 
 ### `answer`
 
@@ -182,7 +256,7 @@ Calculated configuration families. Each family contains groups, and each group c
 | `mongodb` | One shard or replica-set `mongod` member. |
 | `configserver` | One config-server `mongod` member in a sharded cluster. |
 | `mongos` | One `mongos` query router in a sharded cluster. |
-| `monitor` | PMM Client sidecar resources. |
+| `monitor` | PMM Client sidecar resources and probes. In sharded clusters, groups are prefixed with `mongod.`, `configserver.`, or `mongos.`. |
 
 | Group | Meaning |
 |---|---|
@@ -190,55 +264,29 @@ Calculated configuration families. Each family contains groups, and each group c
 | `resources` | Kubernetes CPU and memory requests and limits. |
 | `readinessProbe` | Readiness probe settings. |
 | `livenessProbe` | Liveness probe settings. |
-| `pbm-agent.resources` | PBM agent CPU and memory requests and limits when `backup.enabled` is `true`; emitted under `mongodb` and `configserver`. |
+| `pbm-agent.resources` | PBM agent requests and limits when `backup.enabled` is `true`; emitted under `mongodb` and `configserver`. |
 
-Output units are parameter-specific: resource memory values are bytes, CPU values are Kubernetes millicores, WiredTiger cache is GB, and connection limits are integers.
+Output units are parameter-specific: resource memory values are bytes, CPU values are Kubernetes millicores, WiredTiger cache is binary GB, and connection limits are integers.
 
 ## HTTP API
 
 ### `GET /supported`
 
-Returns supported database types, dimensions, workload types, connection presets, output formats, and MongoDB version range.
+Returns supported database types, dimensions, workload types, connection presets, output formats, and MongoDB version range. Allocation fields in the dimension list are `0`, because they depend on the request.
 
 ```bash
 curl -i http://127.0.0.1:8080/supported
 ```
 
-Example response:
-
-```json
-{
-  "dbtype": ["replica_set", "sharded_cluster"],
-  "dimension": [
-    {"id": 1, "name": "XSmall", "cpu": 600, "memory": "1Gi"},
-    {"id": 2, "name": "Small", "cpu": 800, "memory": "2Gi"},
-    {"id": 3, "name": "Medium", "cpu": 1000, "memory": "4Gi"},
-    {"id": 4, "name": "Large", "cpu": 2000, "memory": "8Gi"},
-    {"id": 5, "name": "XLarge", "cpu": 4000, "memory": "16Gi"},
-    {"id": 6, "name": "2XLarge", "cpu": 8000, "memory": "32Gi"},
-    {"id": 7, "name": "4XLarge", "cpu": 16000, "memory": "64Gi"},
-    {"id": 8, "name": "8XLarge", "cpu": 32000, "memory": "128Gi"},
-    {"id": 9, "name": "12XLarge", "cpu": 64000, "memory": "256Gi"},
-    {"id": 10, "name": "16XLarge", "cpu": 128000, "memory": "512Gi"},
-    {"id": 999, "name": "Open request by resources", "cpu": 0, "memory": "0"}
-  ],
-  "loadtype": [
-    {"id": 1, "name": "Mainly Reads", "example": "Read-heavy workload"},
-    {"id": 2, "name": "Light OLTP", "example": "Mixed workload with moderate writes"},
-    {"id": 3, "name": "Heavy OLTP", "example": "Highly concurrent mixed workload"},
-    {"id": 4, "name": "Mainly Writes", "example": "Write-heavy workload"}
-  ],
-  "connections": [50, 100, 200, 500, 1000, 2000],
-  "output": ["human", "json"],
-  "mongodbversions": {"min": {"major": 7, "minor": 0, "patch": 0}, "max": {"major": 8, "minor": 99, "patch": 99}}
-}
-```
-
 Only `GET` is supported. Other methods return HTTP `405` and `Allow: GET`.
+
+### `GET /healthz`
+
+Returns `{"status":"ok","version":"<version>"}` with HTTP `200`. Only `GET` is supported.
 
 ### `POST /calculator`
 
-Accepts a JSON request body and returns JSON by default, or operator-oriented text when `output` is `human`.
+Accepts a JSON request body of at most 1 MiB and returns JSON by default, or operator-oriented text when `output` is `human`.
 
 Only `POST` is supported. Other methods return HTTP `405` and `Allow: POST`.
 
@@ -247,19 +295,23 @@ HTTP statuses:
 | Status | Meaning |
 |---:|---|
 | `200` | Successful or close-to-limit calculation. |
-| `400` | Malformed JSON or invalid request. |
-| `422` | Valid request but insufficient resources for the requested workload. |
+| `400` | Malformed JSON, unknown fields, or invalid request. |
 | `405` | Unsupported HTTP method. |
+| `413` | Request body larger than 1 MiB. |
+| `422` | Valid request but insufficient resources for the requested workload. |
+
+The server sets read, write, and idle timeouts, so slow clients cannot hold connections open.
 
 ## Complete Replica-Set Example
 
 Request:
 
+<!-- request:replica-set -->
 ```json
 {
   "output": "json",
   "dbtype": "replica_set",
-  "dimension": {"id": 2},
+  "dimension": {"id": 4},
   "loadtype": {"id": 2},
   "connections": 500,
   "mongodbversion": {"major": 7, "minor": 0, "patch": 0}
@@ -274,35 +326,53 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Expected output:
 
+<!-- response:replica-set -->
 ```json
 {
   "message": {
     "type": 1001,
     "name": "Execution was successful and resources match the requested workload",
-    "text": "estimated capacity utilization is 75%"
+    "text": "estimated capacity utilization is 38% (CPU 38%, memory 32%)"
   },
   "incoming": {
     "dbtype": "replica_set",
     "dimension": {
-      "id": 2,
-      "name": "Small",
-      "cpu": 800,
-      "memory": "2Gi",
-      "mongodbCpu": 700,
-      "monitorCpu": 100,
+      "id": 4,
+      "name": "Large",
+      "cpu": 2000,
+      "memory": "8Gi",
+      "mongodbCpu": 1600,
+      "monitorCpu": 400,
+      "backupCpu": 0,
       "mongosCpu": 0,
       "configCpu": 0,
-      "mongodbMemory": 2013265920,
-      "monitorMemory": 134217728,
+      "mongodbMemory": 8333033472,
+      "monitorMemory": 256000000,
+      "backupMemory": 0,
       "mongosMemory": 0,
       "configMemory": 0
     },
-    "loadtype": {"id": 2, "name": "Light OLTP", "example": "Mixed workload with moderate writes"},
+    "loadtype": {
+      "id": 2,
+      "name": "Light OLTP",
+      "example": "Mixed workload with moderate writes"
+    },
     "connections": 500,
     "output": "json",
-    "mongodbversion": {"major": 7, "minor": 0, "patch": 0},
+    "mongodbversion": {
+      "major": 7,
+      "minor": 0,
+      "patch": 0
+    },
     "providercostpct": 0,
-    "mongodbdedicated": false
+    "mongodbdedicated": false,
+    "guaranteedqos": false,
+    "backup": {
+      "enabled": false
+    },
+    "mongos": {
+      "count": 0
+    }
   },
   "answer": {
     "mongodb": {
@@ -311,20 +381,89 @@ Expected output:
         "configuration": {
           "name": "configuration",
           "parameters": {
-            "net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"},
-            "storage.engine": {"name": "storage.engine", "value": "wiredTiger"},
-            "storage.wiredTiger.engineConfig.cacheSizeGB": {"name": "storage.wiredTiger.engineConfig.cacheSizeGB", "value": "0.94"}
+            "net.maxIncomingConnections": {
+              "name": "net.maxIncomingConnections",
+              "value": "675"
+            },
+            "storage.engine": {
+              "name": "storage.engine",
+              "value": "wiredTiger"
+            },
+            "storage.wiredTiger.engineConfig.cacheSizeGB": {
+              "name": "storage.wiredTiger.engineConfig.cacheSizeGB",
+              "value": "3.88"
+            }
           }
         },
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "4"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "30"
+            },
+            "startupDelaySeconds": {
+              "name": "startupDelaySeconds",
+              "value": "7200"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "10"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "8"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "10"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "3"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "2"
+            }
+          }
+        },
         "resources": {
           "name": "resources",
           "parameters": {
-            "limit_cpu": {"name": "limit_cpu", "value": "700m"},
-            "limit_memory": {"name": "limit_memory", "value": "2013265920"},
-            "request_cpu": {"name": "request_cpu", "value": "665m"},
-            "request_memory": {"name": "request_memory", "value": "1912602624"}
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "1600m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "8333033472"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "1520m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "7915700224"
+            }
           }
         }
       }
@@ -332,16 +471,71 @@ Expected output:
     "monitor": {
       "name": "pmm-client",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "5"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "5"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "5"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "1"
+            }
+          }
+        },
         "resources": {
           "name": "resources",
           "parameters": {
-            "limit_cpu": {"name": "limit_cpu", "value": "400m"},
-            "limit_memory": {"name": "limit_memory", "value": "256000000"},
-            "request_cpu": {"name": "request_cpu", "value": "300m"},
-            "request_memory": {"name": "request_memory", "value": "150000000"}
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "400m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "256000000"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "150000000"
+            }
           }
         }
       }
@@ -354,77 +548,588 @@ Expected output:
 
 Request:
 
+<!-- request:sharded-cluster -->
 ```json
 {
   "output": "json",
   "dbtype": "sharded_cluster",
-  "dimension": {"id": 3},
+  "dimension": {"id": 5},
   "loadtype": {"id": 2},
-  "connections": 500,
+  "connections": 1500,
+  "mongos": {"count": 3},
+  "backup": {"enabled": true},
   "mongodbversion": {"major": 8, "minor": 0, "patch": 0}
 }
 ```
 
-Expected output families and representative values. Every component is an independent pod; no shard count or replica-set member count is assumed:
+Expected output. Every component is an independent pod; no shard count or replica-set member count is assumed:
 
+<!-- response:sharded-cluster -->
 ```json
 {
-  "message": {"type": 1001, "name": "Execution was successful and resources match the requested workload", "text": "estimated capacity utilization is 70%"},
+  "message": {
+    "type": 1001,
+    "name": "Execution was successful and resources match the requested workload",
+    "text": "estimated capacity utilization is 48% (shard mongod 48%, config server 30%, mongos 69%)"
+  },
   "incoming": {
     "dbtype": "sharded_cluster",
     "dimension": {
-      "id": 3, "name": "Medium", "cpu": 1000, "memory": "4Gi",
-      "mongodbCpu": 800, "monitorCpu": 200, "mongosCpu": 0, "configCpu": 0,
-      "mongodbMemory": 4026531840, "monitorMemory": 268435456,
-      "mongosMemory": 0, "configMemory": 0
+      "id": 5,
+      "name": "XLarge",
+      "cpu": 4000,
+      "memory": "16Gi",
+      "mongodbCpu": 3300,
+      "monitorCpu": 400,
+      "backupCpu": 300,
+      "mongosCpu": 600,
+      "configCpu": 1000,
+      "mongodbMemory": 15635316736,
+      "monitorMemory": 256000000,
+      "backupMemory": 1288490188,
+      "mongosMemory": 1342177280,
+      "configMemory": 2147483648
     },
-    "loadtype": {"id": 2, "name": "Light OLTP", "example": "Mixed workload with moderate writes"},
-    "connections": 500,
+    "loadtype": {
+      "id": 2,
+      "name": "Light OLTP",
+      "example": "Mixed workload with moderate writes"
+    },
+    "connections": 1500,
     "output": "json",
-    "mongodbversion": {"major": 8, "minor": 0, "patch": 0},
+    "mongodbversion": {
+      "major": 8,
+      "minor": 0,
+      "patch": 0
+    },
     "providercostpct": 0,
-    "mongodbdedicated": false
+    "mongodbdedicated": false,
+    "guaranteedqos": false,
+    "backup": {
+      "enabled": true
+    },
+    "mongos": {
+      "count": 3
+    }
   },
   "answer": {
     "configserver": {
       "name": "config-server",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "1073741824"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "1020054732"}}}
+        "configuration": {
+          "name": "configuration",
+          "parameters": {
+            "net.maxIncomingConnections": {
+              "name": "net.maxIncomingConnections",
+              "value": "169"
+            },
+            "storage.engine": {
+              "name": "storage.engine",
+              "value": "wiredTiger"
+            },
+            "storage.wiredTiger.engineConfig.cacheSizeGB": {
+              "name": "storage.wiredTiger.engineConfig.cacheSizeGB",
+              "value": "1"
+            }
+          }
+        },
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "4"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "30"
+            },
+            "startupDelaySeconds": {
+              "name": "startupDelaySeconds",
+              "value": "7200"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "10"
+            }
+          }
+        },
+        "pbm-agent.resources": {
+          "name": "pbm-agent.resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "300m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "1288490188"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "1073741824"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "10"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "3"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "2"
+            }
+          }
+        },
+        "resources": {
+          "name": "resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "1000m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "2147483648"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "950m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "2039480320"
+            }
+          }
+        }
       }
     },
     "mongodb": {
       "name": "mongod",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"}, "storage.engine": {"name": "storage.engine", "value": "wiredTiger"}, "storage.wiredTiger.engineConfig.cacheSizeGB": {"name": "storage.wiredTiger.engineConfig.cacheSizeGB", "value": "1.88"}}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "800m"}, "limit_memory": {"name": "limit_memory", "value": "4026531840"}, "request_cpu": {"name": "request_cpu", "value": "760m"}, "request_memory": {"name": "request_memory", "value": "3825205248"}}}
+        "configuration": {
+          "name": "configuration",
+          "parameters": {
+            "net.maxIncomingConnections": {
+              "name": "net.maxIncomingConnections",
+              "value": "1855"
+            },
+            "storage.engine": {
+              "name": "storage.engine",
+              "value": "wiredTiger"
+            },
+            "storage.wiredTiger.engineConfig.cacheSizeGB": {
+              "name": "storage.wiredTiger.engineConfig.cacheSizeGB",
+              "value": "7.28"
+            }
+          }
+        },
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "4"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "30"
+            },
+            "startupDelaySeconds": {
+              "name": "startupDelaySeconds",
+              "value": "7200"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "10"
+            }
+          }
+        },
+        "pbm-agent.resources": {
+          "name": "pbm-agent.resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "300m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "1288490188"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "1073741824"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "8"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "10"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "3"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "2"
+            }
+          }
+        },
+        "resources": {
+          "name": "resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "3300m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "15635316736"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "3135m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "14853079040"
+            }
+          }
+        }
       }
     },
     "mongos": {
       "name": "mongos",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "575"}}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "500m"}, "limit_memory": {"name": "limit_memory", "value": "536870912"}, "request_cpu": {"name": "request_cpu", "value": "475m"}, "request_memory": {"name": "request_memory", "value": "510027366"}}}
+        "configuration": {
+          "name": "configuration",
+          "parameters": {
+            "net.maxIncomingConnections": {
+              "name": "net.maxIncomingConnections",
+              "value": "675"
+            }
+          }
+        },
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "4"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "30"
+            },
+            "startupDelaySeconds": {
+              "name": "startupDelaySeconds",
+              "value": "7200"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "10"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "10"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "3"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "2"
+            }
+          }
+        },
+        "resources": {
+          "name": "resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "600m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "1342177280"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "570m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "1275068416"
+            }
+          }
+        }
       }
     },
     "monitor": {
       "name": "pmm-client",
       "groups": {
-        "mongod.resources": {"name": "mongod.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
-        "mongod.readinessProbe": {"name": "mongod.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "mongod.livenessProbe": {"name": "mongod.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "configserver.resources": {"name": "configserver.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
-        "configserver.readinessProbe": {"name": "configserver.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "configserver.livenessProbe": {"name": "configserver.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}},
-        "mongos.resources": {"name": "mongos.resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "400m"}, "limit_memory": {"name": "limit_memory", "value": "256000000"}, "request_cpu": {"name": "request_cpu", "value": "300m"}, "request_memory": {"name": "request_memory", "value": "150000000"}}},
-        "mongos.readinessProbe": {"name": "mongos.readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "23"}}},
-        "mongos.livenessProbe": {"name": "mongos.livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "45"}}}
+        "configserver.livenessProbe": {
+          "name": "configserver.livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "5"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "5"
+            }
+          }
+        },
+        "configserver.readinessProbe": {
+          "name": "configserver.readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "5"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "1"
+            }
+          }
+        },
+        "configserver.resources": {
+          "name": "configserver.resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "400m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "256000000"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "150000000"
+            }
+          }
+        },
+        "mongod.livenessProbe": {
+          "name": "mongod.livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "5"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "5"
+            }
+          }
+        },
+        "mongod.readinessProbe": {
+          "name": "mongod.readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "5"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "1"
+            }
+          }
+        },
+        "mongod.resources": {
+          "name": "mongod.resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "400m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "256000000"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "150000000"
+            }
+          }
+        },
+        "mongos.livenessProbe": {
+          "name": "mongos.livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "5"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "5"
+            }
+          }
+        },
+        "mongos.readinessProbe": {
+          "name": "mongos.readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "3"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "5"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "10"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "1"
+            }
+          }
+        },
+        "mongos.resources": {
+          "name": "mongos.resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "400m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "256000000"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "300m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "150000000"
+            }
+          }
+        }
       }
     }
   }
@@ -437,6 +1142,7 @@ Every value above is per component. The calculator does not multiply the shard `
 
 Request:
 
+<!-- request:dedicated -->
 ```json
 {
   "output": "json",
@@ -451,27 +1157,146 @@ Request:
 
 Expected output:
 
+<!-- response:dedicated -->
 ```json
 {
-  "message": {"type": 1001, "name": "Execution was successful and resources match the requested workload", "text": "estimated capacity utilization is 66%"},
+  "message": {
+    "type": 1001,
+    "name": "Execution was successful and resources match the requested workload",
+    "text": "estimated capacity utilization is 35% (CPU 19%, memory 35%)"
+  },
   "incoming": {
     "dbtype": "replica_set",
-    "dimension": {"id": 2, "name": "Small", "cpu": 800, "memory": "2Gi", "mongodbCpu": 800, "monitorCpu": 100, "mongosCpu": 0, "configCpu": 0, "mongodbMemory": 2147483648, "monitorMemory": 134217728, "mongosMemory": 0, "configMemory": 0},
-    "loadtype": {"id": 1, "name": "Mainly Reads", "example": "Read-heavy workload"},
+    "dimension": {
+      "id": 2,
+      "name": "Small",
+      "cpu": 800,
+      "memory": "2Gi",
+      "mongodbCpu": 800,
+      "monitorCpu": 0,
+      "backupCpu": 0,
+      "mongosCpu": 0,
+      "configCpu": 0,
+      "mongodbMemory": 2147483648,
+      "monitorMemory": 0,
+      "backupMemory": 0,
+      "mongosMemory": 0,
+      "configMemory": 0
+    },
+    "loadtype": {
+      "id": 1,
+      "name": "Mainly Reads",
+      "example": "Read-heavy workload"
+    },
     "connections": 100,
     "output": "json",
-    "mongodbversion": {"major": 7, "minor": 0, "patch": 0},
+    "mongodbversion": {
+      "major": 7,
+      "minor": 0,
+      "patch": 0
+    },
     "providercostpct": 0,
-    "mongodbdedicated": true
+    "mongodbdedicated": true,
+    "guaranteedqos": false,
+    "backup": {
+      "enabled": false
+    },
+    "mongos": {
+      "count": 0
+    }
   },
   "answer": {
     "mongodb": {
       "name": "mongod",
       "groups": {
-        "configuration": {"name": "configuration", "parameters": {"net.maxIncomingConnections": {"name": "net.maxIncomingConnections", "value": "115"}, "storage.engine": {"name": "storage.engine", "value": "wiredTiger"}, "storage.wiredTiger.engineConfig.cacheSizeGB": {"name": "storage.wiredTiger.engineConfig.cacheSizeGB", "value": "1"}}},
-        "livenessProbe": {"name": "livenessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "33"}}},
-        "readinessProbe": {"name": "readinessProbe", "parameters": {"timeoutSeconds": {"name": "timeoutSeconds", "value": "17"}}},
-        "resources": {"name": "resources", "parameters": {"limit_cpu": {"name": "limit_cpu", "value": "800m"}, "limit_memory": {"name": "limit_memory", "value": "2147483648"}, "request_cpu": {"name": "request_cpu", "value": "760m"}, "request_memory": {"name": "request_memory", "value": "2040109465"}}}
+        "configuration": {
+          "name": "configuration",
+          "parameters": {
+            "net.maxIncomingConnections": {
+              "name": "net.maxIncomingConnections",
+              "value": "215"
+            },
+            "storage.engine": {
+              "name": "storage.engine",
+              "value": "wiredTiger"
+            },
+            "storage.wiredTiger.engineConfig.cacheSizeGB": {
+              "name": "storage.wiredTiger.engineConfig.cacheSizeGB",
+              "value": "1"
+            }
+          }
+        },
+        "livenessProbe": {
+          "name": "livenessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "4"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "60"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "30"
+            },
+            "startupDelaySeconds": {
+              "name": "startupDelaySeconds",
+              "value": "7200"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "10"
+            }
+          }
+        },
+        "readinessProbe": {
+          "name": "readinessProbe",
+          "parameters": {
+            "failureThreshold": {
+              "name": "failureThreshold",
+              "value": "8"
+            },
+            "initialDelaySeconds": {
+              "name": "initialDelaySeconds",
+              "value": "10"
+            },
+            "periodSeconds": {
+              "name": "periodSeconds",
+              "value": "3"
+            },
+            "successThreshold": {
+              "name": "successThreshold",
+              "value": "1"
+            },
+            "timeoutSeconds": {
+              "name": "timeoutSeconds",
+              "value": "2"
+            }
+          }
+        },
+        "resources": {
+          "name": "resources",
+          "parameters": {
+            "limit_cpu": {
+              "name": "limit_cpu",
+              "value": "800m"
+            },
+            "limit_memory": {
+              "name": "limit_memory",
+              "value": "2147483648"
+            },
+            "request_cpu": {
+              "name": "request_cpu",
+              "value": "760m"
+            },
+            "request_memory": {
+              "name": "request_memory",
+              "value": "2039480320"
+            }
+          }
+        }
       }
     }
   }
@@ -482,26 +1307,136 @@ The `monitor`, `mongos`, and `configserver` families are intentionally absent.
 
 ## Overload Example
 
-```bash
-curl -i -X POST -H 'Content-Type: application/json' \
-  -d '{"output":"json","dbtype":"replica_set","dimension":{"id":2},"loadtype":{"id":4},"connections":10000,"mongodbversion":{"major":7,"minor":0,"patch":0}}' \
-  http://127.0.0.1:8080/calculator
-```
-
-The response has HTTP status `422` and the following shape:
-
+<!-- request:overload -->
 ```json
 {
-  "message": {"type": 3001, "name": "Resources overloaded", "text": "safe capacity exceeded"},
+  "output": "json",
+  "dbtype": "replica_set",
+  "dimension": {"id": 2},
+  "loadtype": {"id": 4},
+  "connections": 10000,
+  "mongodbversion": {"major": 7, "minor": 0, "patch": 0}
+}
+```
+
+The response has HTTP status `422`:
+
+<!-- response:overload -->
+```json
+{
+  "message": {
+    "type": 3001,
+    "name": "Resources are not enough to cover the requested workload",
+    "text": "safe capacity exceeded: mongod at 7525% (CPU 7525%, memory 2797%); choose a larger dimension or reduce connections"
+  },
   "incoming": {
     "dbtype": "replica_set",
-    "dimension": {"id": 2, "name": "Small", "cpu": 800, "memory": "2Gi", "mongodbCpu": 700, "monitorCpu": 100, "mongosCpu": 0, "configCpu": 0, "mongodbMemory": 2013265920, "monitorMemory": 134217728, "mongosMemory": 0, "configMemory": 0},
-    "loadtype": {"id": 4, "name": "Mainly Writes", "example": "Write-heavy workload"},
+    "dimension": {
+      "id": 2,
+      "name": "Small",
+      "cpu": 800,
+      "memory": "2Gi",
+      "mongodbCpu": 400,
+      "monitorCpu": 400,
+      "backupCpu": 0,
+      "mongosCpu": 0,
+      "configCpu": 0,
+      "mongodbMemory": 1890582528,
+      "monitorMemory": 256000000,
+      "backupMemory": 0,
+      "mongosMemory": 0,
+      "configMemory": 0
+    },
+    "loadtype": {
+      "id": 4,
+      "name": "Mainly Writes",
+      "example": "Write-heavy workload"
+    },
     "connections": 10000,
     "output": "json",
-    "mongodbversion": {"major": 7, "minor": 0, "patch": 0},
+    "mongodbversion": {
+      "major": 7,
+      "minor": 0,
+      "patch": 0
+    },
     "providercostpct": 0,
-    "mongodbdedicated": false
+    "mongodbdedicated": false,
+    "guaranteedqos": false,
+    "backup": {
+      "enabled": false
+    },
+    "mongos": {
+      "count": 0
+    }
+  },
+  "answer": {}
+}
+```
+
+## Dimension Too Small Example
+
+XSmall cannot hold `mongod` plus the PMM sidecar:
+
+<!-- request:too-small -->
+```json
+{
+  "dbtype": "replica_set",
+  "dimension": {"id": 1},
+  "loadtype": {"id": 1},
+  "connections": 10,
+  "mongodbversion": {"major": 8, "minor": 0, "patch": 0}
+}
+```
+
+The response has HTTP status `422`:
+
+<!-- response:too-small -->
+```json
+{
+  "message": {
+    "type": 3001,
+    "name": "Resources are not enough to cover the requested workload",
+    "text": "dimension XSmall (600m/1Gi) leaves 200m CPU and 779Mi memory for mongod after PMM 400m/244Mi; the minimum is 250m and 512Mi; choose a larger dimension or set mongodbdedicated"
+  },
+  "incoming": {
+    "dbtype": "replica_set",
+    "dimension": {
+      "id": 1,
+      "name": "XSmall",
+      "cpu": 600,
+      "memory": "1Gi",
+      "mongodbCpu": 200,
+      "monitorCpu": 400,
+      "backupCpu": 0,
+      "mongosCpu": 0,
+      "configCpu": 0,
+      "mongodbMemory": 816840704,
+      "monitorMemory": 256000000,
+      "backupMemory": 0,
+      "mongosMemory": 0,
+      "configMemory": 0
+    },
+    "loadtype": {
+      "id": 1,
+      "name": "Mainly Reads",
+      "example": "Read-heavy workload"
+    },
+    "connections": 10,
+    "output": "json",
+    "mongodbversion": {
+      "major": 8,
+      "minor": 0,
+      "patch": 0
+    },
+    "providercostpct": 0,
+    "mongodbdedicated": false,
+    "guaranteedqos": false,
+    "backup": {
+      "enabled": false
+    },
+    "mongos": {
+      "count": 0
+    }
   },
   "answer": {}
 }
@@ -509,30 +1444,71 @@ The response has HTTP status `422` and the following shape:
 
 ## Operator-Oriented Human Output
 
-Set `output` to `human` to receive sections suitable for mapping into a Percona Operator custom resource:
+Set `output` to `human` to receive sections suitable for mapping into a Percona Operator custom resource. Empty sections are omitted.
 
+<!-- request:human -->
+```json
+{
+  "output": "human",
+  "dbtype": "replica_set",
+  "dimension": {"id": 4},
+  "loadtype": {"id": 2},
+  "connections": 500,
+  "backup": {"enabled": true},
+  "mongodbversion": {"major": 8, "minor": 0, "patch": 0}
+}
+```
+
+<!-- response:human -->
 ```ini
 [message]
 name = Execution was successful and resources match the requested workload
 type = 1001
-text = estimated capacity utilization is 75%
+text = estimated capacity utilization is 46% (CPU 46%, memory 36%)
 
 [mongod.configuration]
-net.maxIncomingConnections = 575
+net.maxIncomingConnections = 675
 storage.engine = wiredTiger
-storage.wiredTiger.engineConfig.cacheSizeGB = 0.94
-
-[mongod.resources]
-limit_cpu = 700m
-limit_memory = 2013265920
-request_cpu = 665m
-request_memory = 1912602624
-
-[mongod.readinessProbe]
-timeoutSeconds = 23
+storage.wiredTiger.engineConfig.cacheSizeGB = 3.28
 
 [mongod.livenessProbe]
-timeoutSeconds = 45
+failureThreshold = 4
+initialDelaySeconds = 60
+periodSeconds = 30
+startupDelaySeconds = 7200
+timeoutSeconds = 10
+
+[mongod.pbm-agent.resources]
+limit_cpu = 300m
+limit_memory = 1288490188
+request_cpu = 300m
+request_memory = 1073741824
+
+[mongod.readinessProbe]
+failureThreshold = 8
+initialDelaySeconds = 10
+periodSeconds = 3
+successThreshold = 1
+timeoutSeconds = 2
+
+[mongod.resources]
+limit_cpu = 1300m
+limit_memory = 7045382144
+request_cpu = 1235m
+request_memory = 6693060608
+
+[pmm-client.livenessProbe]
+failureThreshold = 5
+initialDelaySeconds = 60
+periodSeconds = 10
+timeoutSeconds = 5
+
+[pmm-client.readinessProbe]
+failureThreshold = 3
+initialDelaySeconds = 5
+periodSeconds = 10
+successThreshold = 1
+timeoutSeconds = 1
 
 [pmm-client.resources]
 limit_cpu = 400m
@@ -543,18 +1519,6 @@ request_memory = 150000000
 ```
 
 Sharded output uses `mongod`, `configserver.mongod`, `mongos`, and component-specific PMM sections such as `pmm-client.mongod.resources`, `pmm-client.configserver.resources`, and `pmm-client.mongos.resources`. When backup is enabled, it also includes `mongod.pbm-agent.resources` and `configserver.mongod.pbm-agent.resources`. Values are sorted deterministically.
-
-When `backup.enabled` is `true`, the relevant human-readable output includes:
-
-```ini
-[mongod.pbm-agent.resources]
-limit_cpu = 300m
-limit_memory = 1288490188
-request_cpu = 300m
-request_memory = 1073741824
-```
-
-For a sharded cluster, the corresponding config-server section is `[configserver.mongod.pbm-agent.resources]`.
 
 ## Using as a Go Module
 
@@ -591,7 +1555,7 @@ Calculate a replica-set configuration:
 request := MO.ConfigurationRequest{
     Output:      MO.ResultOutputFormatJson,
     DBType:      MO.DbTypeReplicaSet,
-    Dimension:   MO.Dimension{Id: 2},
+    Dimension:   MO.Dimension{Id: 4},
     LoadType:    MO.LoadType{Id: MO.LoadTypeSomeWrites},
     Connections: 500,
     MongoDBVersion: MO.Version{Major: 7, Minor: 0, Patch: 0},
@@ -610,18 +1574,13 @@ if err != nil {
 fmt.Println(output.String())
 ```
 
-Calculate a custom dimension:
+Calculate a custom dimension. `Memory` is parsed by `Init`; you can also set `MemoryBytes` directly and leave `Memory` empty:
 
 ```go
 request.Dimension = MO.Dimension{
     Id:     MO.DimensionOpen,
     Cpu:    4000,
     Memory: "8Gi",
-}
-request.Dimension.MemoryBytes, err =
-    request.Dimension.ConvertMemoryToBytes(request.Dimension.Memory)
-if err != nil {
-    log.Fatal(err)
 }
 request = calculator.Init(request, conf)
 ```
@@ -640,18 +1599,21 @@ cache := mongodbFamily.Groups[MO.GroupNameConfiguration].Parameters[
 fmt.Println(cache.Value)
 ```
 
-The public `Init()` signature is intentionally compatible with the MySQL calculator. Validation and calculation errors are returned by `GetCalculate()`.
+The public `Init()` signature is intentionally compatible with the MySQL calculator. Validation and calculation errors are returned by `GetCalculate()`. Unlike the HTTP API, the Go API cannot reject unknown fields; everything else is validated the same way.
 
 ## Percona Operator Mapping
 
 | Calculator family | Percona Operator for MongoDB target |
 |---|---|
-| `mongodb` | One replica-set or shard `mongod` member configuration and resources. |
-| `configserver` | One config-server `mongod` member in a sharded deployment. |
-| `mongos` | One sharded-cluster query router. |
-| `monitor` | PMM Client sidecar resources. |
+| `mongodb` | `replsets[].resources`, `livenessProbe`, `readinessProbe`, and `configuration` for one replica-set or shard member. |
+| `mongodb` → `pbm-agent.resources` | `backup.resources`. |
+| `configserver` | `sharding.configsvrReplSet` resources, probes, and configuration. |
+| `mongos` | `sharding.mongos` resources, probes, and configuration; set `sharding.mongos.size` to `mongos.count`. |
+| `monitor` | `pmm.resources`. |
 
-The calculator does not generate authentication, TLS, read concern, write concern, replication, storage, or backup scheduling policy. Configure those separately in the Percona Operator custom resource and application. When `backup.enabled` is true, it does include the PBM agent sidecar resource estimate.
+The operator has a single `backup.resources` and a single `pmm.resources` setting, so the values are the same for every component.
+
+The calculator does not generate authentication, TLS, read concern, write concern, replication, storage, or backup scheduling policy. Configure those separately in the Percona Operator custom resource and application.
 
 ## Verification
 
@@ -661,4 +1623,10 @@ go test ./...
 go vet ./...
 go build -o /tmp/mongodboperatorcalculator ./src
 git diff --check
+```
+
+The README examples are checked against real output by `TestReadmeExamplesMatchOutput`. After an intentional output change, regenerate them with:
+
+```bash
+go test ./src -run TestReadmeExamples -update-readme
 ```
