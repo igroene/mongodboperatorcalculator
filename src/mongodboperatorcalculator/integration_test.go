@@ -81,6 +81,31 @@ func TestMongosScalesWithConnectionsAndCount(t *testing.T) {
 	}
 }
 
+// Every mongos keeps idle pool connections to each shard. They cost thread
+// stack memory on the shard even when there is almost no client traffic.
+func TestShardCapacityIncludesMongosPoolMemory(t *testing.T) {
+	req := ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 2}, LoadType: LoadType{Id: 1}, Connections: 1, Mongos: MongosConfiguration{Count: 100}}
+	_, msg, _, err := calculate(t, req)
+	if err == nil || msg.MType != OverutilizingI || !strings.Contains(msg.MText, "shard mongod at") {
+		t.Fatalf("1000 pool connections must not fit in 901Mi outside the cache: %v %+v", err, msg)
+	}
+	few, _, _, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 5}, LoadType: LoadType{Id: 1}, Connections: 100, Mongos: MongosConfiguration{Count: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	many, _, _, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 5}, LoadType: LoadType{Id: 1}, Connections: 100, Mongos: MongosConfiguration{Count: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fewPlan, manyPlan := planResources(few), planResources(many)
+	if manyPlan.components[0].memory <= fewPlan.components[0].memory {
+		t.Fatalf("more mongos should raise shard memory use: 1=%v 100=%v", fewPlan.components[0], manyPlan.components[0])
+	}
+	if manyPlan.components[0].cpu != fewPlan.components[0].cpu {
+		t.Fatalf("idle pool connections must not add CPU: 1=%v 100=%v", fewPlan.components[0], manyPlan.components[0])
+	}
+}
+
 func TestBackupAddsPBMAgentToShardAndConfigServer(t *testing.T) {
 	_, _, f, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 4}, LoadType: LoadType{Id: 2}, Connections: 500, Backup: BackupConfiguration{Enabled: true}})
 	if err != nil {

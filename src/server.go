@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -52,20 +53,38 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		logger.Infof("shutting down")
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			logger.Errorf("shutdown failed: %v", err)
-		}
-	}()
 	logger.Infof("starting MongoDB Operator Calculator %s on %s", MO.VERSION, server.Addr)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		logger.Errorf("listen failed: %v", err)
+		os.Exit(1)
+	}
+	if err := serve(ctx, server, listener, logger, 10*time.Second); err != nil {
 		logger.Errorf("server stopped: %v", err)
 		os.Exit(1)
 	}
+}
+
+// serve runs the server until ctx is cancelled, then waits for in-flight
+// requests to finish. Serve returns as soon as Shutdown starts, so serve
+// must not return until Shutdown itself has returned.
+func serve(ctx context.Context, server *http.Server, listener net.Listener, logger *logger, drainTimeout time.Duration) error {
+	shutdownDone := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		logger.Infof("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer cancel()
+		shutdownDone <- server.Shutdown(shutdownCtx)
+	}()
+	if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	if err := <-shutdownDone; err != nil {
+		return fmt.Errorf("shutdown failed: %w", err)
+	}
+	logger.Infof("shutdown complete")
+	return nil
 }
 
 const (

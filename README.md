@@ -197,6 +197,7 @@ Every component gets a CPU and a memory utilization estimate. The reported figur
 
 - **CPU:** `100m + connections × CPU per connection`, divided by the CPU limit.
 - **Memory:** the WiredTiger cache is an allocation, not load, so memory is measured against what is left outside the cache. The estimate is `128Mi + 5% of the memory limit + connections × (1Mi + working memory per connection)`, divided by `memory limit − cache`.
+- **Idle pool connections:** in sharded clusters, each `mongos` keeps `10` pool connections to every shard. On the shard they count `1Mi` of stack memory each, but no CPU, so a high `mongos.count` can overload a small shard even with little client traffic.
 
 The headline utilization is the shard or replica-set `mongod` estimate. `mongos` and the config server are sized by the calculator, so they only count toward the headline once even their largest size is above 85%. Sharded results list all three components in the message text.
 

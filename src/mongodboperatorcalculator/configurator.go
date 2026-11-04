@@ -74,15 +74,19 @@ func planResources(r ConfigurationRequest) resourcePlan {
 	if r.DBType == DbTypeShardedCluster {
 		shardName = "shard mongod"
 	}
-	if p.fitErr == nil {
-		p.components = append(p.components, mongodUtilization(shardName, d.MongoDBCpu, d.MongoDBMemory, r.Connections, load))
-	}
-
+	idlePool := 0
 	if r.DBType == DbTypeShardedCluster {
 		p.mongosCount = r.Mongos.Count
 		if p.mongosCount == 0 {
 			p.mongosCount = DefaultMongosCount
 		}
+		idlePool = p.mongosCount * MongosPoolConnectionsPerShard
+	}
+	if p.fitErr == nil {
+		p.components = append(p.components, mongodUtilization(shardName, d.MongoDBCpu, d.MongoDBMemory, r.Connections, idlePool, load))
+	}
+
+	if r.DBType == DbTypeShardedCluster {
 		p.mongosConnections = int(math.Ceil(float64(r.Connections) / float64(p.mongosCount)))
 		var mongosUse utilization
 		d.MongosCpu, d.MongosMemory, mongosUse = sizeMongos(p.mongosConnections, load)
@@ -97,11 +101,13 @@ func planResources(r ConfigurationRequest) resourcePlan {
 
 // mongodUtilization estimates how much of a mongod container the workload
 // uses. The WiredTiger cache is an allocation, not load, so memory pressure
-// is measured against the memory left outside the cache.
-func mongodUtilization(name string, cpu int, memory float64, connections, load int) utilization {
+// is measured against the memory left outside the cache. Idle connections,
+// such as mongos pool connections, cost thread stack memory but no CPU.
+func mongodUtilization(name string, cpu int, memory float64, connections, idleConnections, load int) utilization {
 	nonCache := memory - cacheBytes(memory)
 	needMemory := MongodBaseOverheadMemory + MongodOverheadPct*memory +
-		float64(connections)*(ConnectionStackMemory+connectionWorkMemory(load))
+		float64(connections)*(ConnectionStackMemory+connectionWorkMemory(load)) +
+		float64(idleConnections)*ConnectionStackMemory
 	needCPU := MongodBaseCPU + float64(connections)*connectionCPU(load)
 	return utilization{component: name, cpu: needCPU / float64(cpu), memory: needMemory / nonCache}
 }
@@ -129,7 +135,7 @@ func sizeConfigServer(connections int, shardMemory float64) (int, float64, utili
 	var tier ConfigServerTier
 	var use utilization
 	for _, tier = range ConfigServerTiers[start:] {
-		use = mongodUtilization("config server", tier.Cpu, tier.Memory, connections, LoadTypeMostlyReads)
+		use = mongodUtilization("config server", tier.Cpu, tier.Memory, connections, 0, LoadTypeMostlyReads)
 		if use.pct() <= CloseLimitPct {
 			break
 		}

@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func post(body string) *httptest.ResponseRecorder {
@@ -80,6 +84,48 @@ func TestHumanOutputOmitsEmptySections(t *testing.T) {
 	body := res.Body.String()
 	if res.Code != http.StatusOK || strings.Contains(body, "[pmm-client.configuration]") || !strings.Contains(body, "\n\n[mongod.configuration]") {
 		t.Fatalf("status=%d body=%s", res.Code, body)
+	}
+}
+
+func TestServeDrainsInFlightRequests(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte("done"))
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, server, listener, newLogger("ERROR"), 5*time.Second) }()
+
+	response := make(chan string, 1)
+	go func() {
+		res, err := http.Get("http://" + listener.Addr().String())
+		if err != nil {
+			response <- "error: " + err.Error()
+			return
+		}
+		defer res.Body.Close()
+		body, _ := io.ReadAll(res.Body)
+		response <- string(body)
+	}()
+	<-entered
+	cancel()
+	select {
+	case err := <-served:
+		t.Fatalf("serve returned before the in-flight request finished: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if got := <-response; got != "done" {
+		t.Fatalf("in-flight request was cut off: %q", got)
+	}
+	if err := <-served; err != nil {
+		t.Fatalf("serve returned %v", err)
 	}
 }
 
