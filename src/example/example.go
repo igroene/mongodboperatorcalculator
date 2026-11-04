@@ -13,7 +13,7 @@ func main() {
 	request := MO.ConfigurationRequest{
 		Output:         MO.ResultOutputFormatJson,
 		DBType:         MO.DbTypeShardedCluster,
-		Dimension:      MO.Dimension{Id: 3},
+		Dimension:      MO.Dimension{Id: 5},
 		LoadType:       MO.LoadType{Id: MO.LoadTypeSomeWrites},
 		Connections:    500,
 		MongoDBVersion: MO.Version{Major: 7, Minor: 0, Patch: 0},

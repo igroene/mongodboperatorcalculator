@@ -4,206 +4,331 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 )
 
+// utilization is the estimated share of a container's CPU and memory limit
+// used by the requested workload.
+type utilization struct {
+	component string
+	cpu       float64
+	memory    float64
+	// autoSized components are sized by the calculator to fit the workload.
+	// They only drive the headline utilization once even their largest
+	// size is close to saturation.
+	autoSized bool
+}
+
+func (u utilization) pct() float64 { return math.Max(u.cpu, u.memory) }
+
+// resourcePlan is the result of fitting the requested workload into the
+// selected dimension and the derived sharded-cluster components.
+type resourcePlan struct {
+	dimension         Dimension
+	mongosCount       int
+	mongosConnections int
+	configConnections int
+	components        []utilization
+	// fitErr is set when the dimension cannot hold mongod plus its sidecars.
+	fitErr error
+}
+
+// planResources computes every container size and utilization estimate. It
+// expects a validated request with a resolved dimension.
+func planResources(r ConfigurationRequest) resourcePlan {
+	d := r.Dimension
+	p := resourcePlan{}
+	totalCPU := int(float64(d.Cpu) * (1 - r.ProviderCostPct))
+	totalMemory := math.Floor(d.MemoryBytes * (1 - r.ProviderCostPct))
+
+	sidecars := []string{}
+	if !r.MongoDBDedicated {
+		d.MonitorCpu, d.MonitorMemory = PMMLimitCPU, PMMLimitMemory
+		sidecars = append(sidecars, fmt.Sprintf("PMM %dm/%s", PMMLimitCPU, formatBytes(PMMLimitMemory)))
+	}
+	if r.Backup.Enabled {
+		d.BackupCpu, d.BackupMemory = PBMAgentCPU, PBMAgentMemory
+		sidecars = append(sidecars, fmt.Sprintf("PBM %dm/%s", PBMAgentCPU, formatBytes(PBMAgentMemory)))
+	}
+	mongodCPU := totalCPU - d.MonitorCpu - d.BackupCpu
+	mongodMemory := floorMiB(totalMemory - d.MonitorMemory - d.BackupMemory)
+	if mongodCPU < MinMongodCPU || mongodMemory < MinMongodMemory {
+		budget := fmt.Sprintf("%dm/%s", totalCPU, formatBytes(totalMemory))
+		hint := "choose a larger dimension"
+		if !r.MongoDBDedicated && r.DBType == DbTypeReplicaSet {
+			hint += " or set mongodbdedicated"
+		}
+		after := ""
+		if len(sidecars) > 0 {
+			after = " after " + strings.Join(sidecars, " and ")
+		}
+		p.fitErr = fmt.Errorf("dimension %s (%s) leaves %dm CPU and %s memory for mongod%s; the minimum is %dm and %s; %s",
+			d.Name, budget, max(0, mongodCPU), formatBytes(math.Max(0, mongodMemory)), after,
+			MinMongodCPU, formatBytes(MinMongodMemory), hint)
+	}
+	d.MongoDBCpu = max(0, mongodCPU)
+	d.MongoDBMemory = math.Max(0, mongodMemory)
+
+	load := r.LoadType.Id
+	shardName := "mongod"
+	if r.DBType == DbTypeShardedCluster {
+		shardName = "shard mongod"
+	}
+	idlePool := 0
+	if r.DBType == DbTypeShardedCluster {
+		p.mongosCount = r.Mongos.Count
+		if p.mongosCount == 0 {
+			p.mongosCount = DefaultMongosCount
+		}
+		idlePool = p.mongosCount * MongosPoolConnectionsPerShard
+	}
+	if p.fitErr == nil {
+		p.components = append(p.components, mongodUtilization(shardName, d.MongoDBCpu, d.MongoDBMemory, r.Connections, idlePool, load))
+	}
+
+	if r.DBType == DbTypeShardedCluster {
+		p.mongosConnections = int(math.Ceil(float64(r.Connections) / float64(p.mongosCount)))
+		var mongosUse utilization
+		d.MongosCpu, d.MongosMemory, mongosUse = sizeMongos(p.mongosConnections, load)
+		p.configConnections = p.mongosCount * MongosPoolConnectionsPerConfig
+		var configUse utilization
+		d.ConfigCpu, d.ConfigMemory, configUse = sizeConfigServer(p.configConnections, d.MongoDBMemory)
+		p.components = append(p.components, configUse, mongosUse)
+	}
+	p.dimension = d
+	return p
+}
+
+// mongodUtilization estimates how much of a mongod container the workload
+// uses. The WiredTiger cache is an allocation, not load, so memory pressure
+// is measured against the memory left outside the cache. Idle connections,
+// such as mongos pool connections, cost thread stack memory but no CPU.
+func mongodUtilization(name string, cpu int, memory float64, connections, idleConnections, load int) utilization {
+	nonCache := memory - cacheBytes(memory)
+	needMemory := MongodBaseOverheadMemory + MongodOverheadPct*memory +
+		float64(connections)*(ConnectionStackMemory+connectionWorkMemory(load)) +
+		float64(idleConnections)*ConnectionStackMemory
+	needCPU := MongodBaseCPU + float64(connections)*connectionCPU(load)
+	return utilization{component: name, cpu: needCPU / float64(cpu), memory: needMemory / nonCache}
+}
+
+// sizeMongos sizes one mongos so the estimated load sits at
+// MongosTargetUtilization, within the mongos minimum and maximum.
+func sizeMongos(connections, load int) (int, float64, utilization) {
+	needCPU := MongosBaseCPU + float64(connections)*connectionCPU(load)*MongosCPUFactor
+	needMemory := MongosBaseMemory + float64(connections)*(ConnectionStackMemory+connectionWorkMemory(load)/2)
+	cpu := int(roundUp(needCPU/MongosTargetUtilization, 100))
+	cpu = min(max(cpu, MongosMinCPU), MongosMaxCPU)
+	memory := roundUp(needMemory/MongosTargetUtilization, 64*mib)
+	memory = math.Min(math.Max(memory, MongosMinMemory), MongosMaxMemory)
+	return cpu, memory, utilization{component: "mongos", cpu: needCPU / float64(cpu), memory: needMemory / memory, autoSized: true}
+}
+
+// sizeConfigServer picks the smallest config-server tier that keeps the
+// metadata workload below CloseLimitPct. Large shards start at the second
+// tier because they usually carry more chunk metadata.
+func sizeConfigServer(connections int, shardMemory float64) (int, float64, utilization) {
+	start := 0
+	if shardMemory >= ConfigLargeShardMemory {
+		start = 1
+	}
+	var tier ConfigServerTier
+	var use utilization
+	for _, tier = range ConfigServerTiers[start:] {
+		use = mongodUtilization("config server", tier.Cpu, tier.Memory, connections, 0, LoadTypeMostlyReads)
+		if use.pct() <= CloseLimitPct {
+			break
+		}
+	}
+	use.autoSized = true
+	return tier.Cpu, tier.Memory, use
+}
+
+func connectionWorkMemory(load int) float64 {
+	return []float64{0, 0.25 * mib, 0.5 * mib, 1 * mib, 1.5 * mib}[load]
+}
+
+// connectionCPU is the estimated millicores used by one busy connection.
+func connectionCPU(load int) float64 { return []float64{0, 0.5, 1, 2, 3}[load] }
+
+func cacheBytes(memory float64) float64 { return memory * WiredTigerCachePct }
+
+func maxIncomingConnections(expected, extra int) int {
+	return int(math.Ceil(float64(expected)*ConnectionHeadroomPct)) + extra + InternalConnectionOverhead
+}
+
 type Configurator struct {
-	request    ConfigurationRequest
-	dimension  Dimension
-	families   map[string]Family
-	memoryUsed float64
-	cpuUsed    float64
+	request  ConfigurationRequest
+	plan     resourcePlan
+	families map[string]Family
 }
 
 func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
-	r := c.request
-	if r.Connections <= 0 {
-		return ResponseMessage{ErrorexecI, "Invalid request", "connections must be greater than zero"}, nil, fmt.Errorf("connections must be greater than zero")
+	if c.plan.fitErr != nil {
+		return ResponseMessage{OverutilizingI, OverutilizingT, c.plan.fitErr.Error()}, nil, c.plan.fitErr
 	}
-	if r.DBType != DbTypeReplicaSet && r.DBType != DbTypeShardedCluster {
-		return ResponseMessage{ErrorexecI, "Invalid request", "unsupported dbtype"}, nil, fmt.Errorf("unsupported dbtype %q", r.DBType)
-	}
-	if r.MongoDBVersion.Major < 7 || r.MongoDBVersion.Major > 8 {
-		return ResponseMessage{ErrorexecI, "Invalid request", "only MongoDB 7 and 8 are supported"}, nil, fmt.Errorf("unsupported MongoDB version")
-	}
-	if r.MongoDBDedicated && r.DBType == DbTypeShardedCluster {
-		return ResponseMessage{ErrorexecI, "Invalid request", "dedicated mode is only valid for replica_set"}, nil, fmt.Errorf("dedicated mode cannot be used with sharded_cluster")
-	}
-	if r.ProviderCostPct < 0 || r.ProviderCostPct >= 1 {
-		return ResponseMessage{ErrorexecI, "Invalid request", "providercostpct must be greater than or equal to 0 and less than 1"}, nil, fmt.Errorf("invalid providercostpct")
-	}
-	f := c.families
-	if c.dimension.MongoDBCpu == 0 {
-		c.dimension.MongoDBCpu = c.dimension.Cpu
-	}
-	if c.dimension.MongoDBMemory == 0 {
-		c.dimension.MongoDBMemory = c.dimension.MemoryBytes
-	}
-	c.sizeMongo(FamilyTypeMongoDB, c.dimension.MongoDBCpu, c.dimension.MongoDBMemory)
-	if !r.MongoDBDedicated {
-		if r.DBType == DbTypeShardedCluster {
-			c.sizeMonitorComponent("mongod", c.dimension.MonitorCpu, c.dimension.MonitorMemory)
-			c.sizeMongos()
-			c.sizeConfig()
-			c.sizeMonitorComponent("configserver", c.configCPU(), c.configMemory())
-			c.sizeMonitorComponent("mongos", c.mongosCPU(), c.mongosMemory())
-		} else {
-			c.sizeMonitor(FamilyTypeMonitor, c.dimension.MonitorCpu, c.dimension.MonitorMemory)
+	worst := 0.0
+	for _, u := range c.plan.components {
+		if math.IsNaN(u.pct()) || math.IsInf(u.pct(), 0) {
+			err := fmt.Errorf("could not estimate %s utilization", u.component)
+			return ResponseMessage{ErrorexecI, InvalidRequestT, err.Error()}, nil, err
+		}
+		if !u.autoSized || u.pct() > CloseLimitPct {
+			worst = math.Max(worst, u.pct())
 		}
 	}
-	pct := c.capacityPct()
-	msg := ResponseMessage{}
-	if pct > 1 {
-		msg = ResponseMessage{OverutilizingI, "Resources overloaded", fmt.Sprintf("safe capacity exceeded (%.0f%% estimated)", pct*100)}
-		return msg, nil, fmt.Errorf("requested workload exceeds safe resources")
+	if worst > 1 {
+		text := "safe capacity exceeded: " + c.overloadDetails()
+		return ResponseMessage{OverutilizingI, OverutilizingT, text}, nil, fmt.Errorf("requested workload exceeds safe resources")
 	}
-	if pct > CloseLimitPct {
-		msg = ResponseMessage{ClosetolimitI, ClosetolimitT, fmt.Sprintf("estimated capacity utilization is %.0f%%", pct*100)}
-	} else {
-		msg = ResponseMessage{OkI, OkT, fmt.Sprintf("estimated capacity utilization is %.0f%%", pct*100)}
+	c.populate()
+	text := fmt.Sprintf("estimated capacity utilization is %.0f%% (%s)", worst*100, c.utilizationDetails())
+	if worst > CloseLimitPct {
+		return ResponseMessage{ClosetolimitI, ClosetolimitT, text}, c.families, nil
 	}
-	return msg, f, nil
+	return ResponseMessage{OkI, OkT, text}, c.families, nil
 }
-func (c *Configurator) sizeMongo(name string, cpu int, mem float64) {
-	if cpu == 0 {
-		cpu = c.dimension.Cpu
+
+func (c *Configurator) utilizationDetails() string {
+	parts := []string{}
+	for _, u := range c.plan.components {
+		if len(c.plan.components) == 1 {
+			return fmt.Sprintf("CPU %.0f%%, memory %.0f%%", u.cpu*100, u.memory*100)
+		}
+		parts = append(parts, fmt.Sprintf("%s %.0f%%", u.component, u.pct()*100))
 	}
-	if mem == 0 {
-		mem = c.dimension.MemoryBytes
+	return strings.Join(parts, ", ")
+}
+
+func (c *Configurator) overloadDetails() string {
+	parts := []string{}
+	for _, u := range c.plan.components {
+		if u.pct() <= 1 {
+			continue
+		}
+		part := fmt.Sprintf("%s at %.0f%% (CPU %.0f%%, memory %.0f%%)", u.component, u.pct()*100, u.cpu*100, u.memory*100)
+		switch u.component {
+		case "mongos":
+			part += "; increase mongos.count"
+		case "config server":
+			part += "; the largest config-server tier is not enough"
+		default:
+			part += "; choose a larger dimension or reduce connections"
+		}
+		parts = append(parts, part)
 	}
-	cache := mem * WiredTigerCachePct
-	conn := float64(c.request.Connections) * connectionMemory(c.request.LoadType.Id)
-	c.memoryUsed = cache + conn + mem*0.15
-	c.cpuUsed = float64(c.request.Connections) * connectionCPU(c.request.LoadType.Id)
-	if c.request.Backup.Enabled {
-		c.memoryUsed += PBMAgentMemory
-		c.cpuUsed += PBMAgentCPU
+	return strings.Join(parts, "; ")
+}
+
+func (c *Configurator) populate() {
+	r := c.request
+	d := c.plan.dimension
+	mongod := c.families[FamilyTypeMongoDB]
+	extra := 0
+	if r.DBType == DbTypeShardedCluster {
+		extra = c.plan.mongosCount * MongosPoolConnectionsPerShard
 	}
-	f := c.families[name]
+	c.setMongodConfiguration(mongod, d.MongoDBMemory, maxIncomingConnections(r.Connections, extra))
+	c.setResources(mongod, GroupNameResources, d.MongoDBCpu, d.MongoDBMemory)
+	setProbes(mongod, "", ReplicaSetReadinessProbe, MongodLivenessProbe)
+	if r.Backup.Enabled {
+		c.setPBMResources(mongod)
+	}
+
+	if !r.MongoDBDedicated {
+		monitor := c.families[FamilyTypeMonitor]
+		prefixes := []string{""}
+		if r.DBType == DbTypeShardedCluster {
+			prefixes = []string{"mongod.", "configserver.", "mongos."}
+		}
+		for _, prefix := range prefixes {
+			c.setPMMResources(monitor, prefix+GroupNameResources)
+			setProbes(monitor, prefix, PMMReadinessProbe, PMMLivenessProbe)
+		}
+	}
+
+	if r.DBType == DbTypeShardedCluster {
+		config := c.families[FamilyTypeConfig]
+		c.setMongodConfiguration(config, d.ConfigMemory, maxIncomingConnections(c.plan.configConnections, 0))
+		c.setResources(config, GroupNameResources, d.ConfigCpu, d.ConfigMemory)
+		setProbes(config, "", ShardedComponentReadiness, MongodLivenessProbe)
+		if r.Backup.Enabled {
+			c.setPBMResources(config)
+		}
+
+		mongos := c.families[FamilyTypeMongos]
+		put(mongos, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(maxIncomingConnections(c.plan.mongosConnections, 0)))
+		c.setResources(mongos, GroupNameResources, d.MongosCpu, d.MongosMemory)
+		setProbes(mongos, "", ShardedComponentReadiness, MongodLivenessProbe)
+	}
+}
+
+func (c *Configurator) setMongodConfiguration(f Family, memory float64, maxConnections int) {
+	cache := math.Max(cacheBytes(memory), MinCacheSizeGB*gib)
 	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", formatGB(cache))
-	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
+	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(maxConnections))
 	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
-	c.setResources(f, cpu, mem)
-	if c.request.Backup.Enabled {
-		c.setPBMAgentResources(f)
+}
+
+// setResources writes limits and requests. Requests are RequestPct of the
+// limit, rounded down to whole millicores and MiB, unless Guaranteed QoS is
+// requested.
+func (c *Configurator) setResources(f Family, group string, cpu int, memory float64) {
+	requestCPU, requestMemory := int(float64(cpu)*RequestPct), floorMiB(memory*RequestPct)
+	if c.request.GuaranteedQoS {
+		requestCPU, requestMemory = cpu, memory
 	}
-	c.setProbes(f)
-	c.families[name] = f
+	writeResources(f, group, requestCPU, cpu, requestMemory, memory)
 }
-func (c *Configurator) sizeConfig() {
-	c.sizeMongoRole(FamilyTypeConfig, c.configCPU(), c.configMemory())
-}
-func (c *Configurator) sizeMongos() {
-	c.sizeRole(FamilyTypeMongos, c.mongosCPU(), c.mongosMemory(), true)
-}
-func (c *Configurator) configCPU() int { return max(500, int(float64(c.dimension.MongoDBCpu)*0.25)) }
-func (c *Configurator) configMemory() float64 {
-	return math.Max(float64(1<<30), c.dimension.MongoDBMemory*0.25)
-}
-func (c *Configurator) mongosCPU() int { return max(500, int(float64(c.dimension.MongoDBCpu)*0.10)) }
-func (c *Configurator) mongosMemory() float64 {
-	return math.Max(float64(512*1024*1024), c.dimension.MongoDBMemory*0.10)
-}
-func (c *Configurator) sizeMongoRole(name string, cpu int, mem float64) {
-	f := c.families[name]
-	cache := mem * WiredTigerCachePct
-	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", formatGB(cache))
-	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
-	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
-	c.setResources(f, cpu, mem)
-	if c.request.Backup.Enabled {
-		c.setPBMAgentResources(f)
+func (c *Configurator) setPMMResources(f Family, group string) {
+	requestCPU, requestMemory := PMMRequestCPU, float64(PMMRequestMemory)
+	if c.request.GuaranteedQoS {
+		requestCPU, requestMemory = PMMLimitCPU, PMMLimitMemory
 	}
-	c.setProbes(f)
-	c.families[name] = f
+	writeResources(f, group, requestCPU, PMMLimitCPU, requestMemory, PMMLimitMemory)
 }
-func (c *Configurator) sizeRole(name string, cpu int, mem float64, router bool) {
-	f := c.families[name]
-	if router {
-		put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(int(math.Ceil(float64(c.request.Connections)*1.15))))
+func (c *Configurator) setPBMResources(f Family) {
+	requestCPU, requestMemory := PBMAgentRequestCPU, float64(PBMAgentRequestMemory)
+	if c.request.GuaranteedQoS {
+		requestCPU, requestMemory = PBMAgentCPU, PBMAgentMemory
 	}
-	c.setResources(f, cpu, mem)
-	c.setProbes(f)
-	c.families[name] = f
+	writeResources(f, GroupNamePBMResources, requestCPU, PBMAgentCPU, requestMemory, PBMAgentMemory)
 }
-func (c *Configurator) sizeMonitor(name string, cpu int, mem float64) {
-	f := c.families[name]
-	c.setPMMResources(f)
-	c.setProbes(f)
-	c.families[name] = f
+func writeResources(f Family, group string, requestCPU, limitCPU int, requestMemory, limitMemory float64) {
+	put(f, group, "request_cpu", fmt.Sprintf("%dm", requestCPU))
+	put(f, group, "limit_cpu", fmt.Sprintf("%dm", limitCPU))
+	put(f, group, "request_memory", strconv.FormatInt(int64(requestMemory), 10))
+	put(f, group, "limit_memory", strconv.FormatInt(int64(limitMemory), 10))
 }
-func (c *Configurator) sizeMonitorComponent(component string, cpu int, mem float64) {
-	f := c.families[FamilyTypeMonitor]
-	for _, group := range []string{GroupNameResources, GroupNameReadinessProbe, GroupNameLivenessProbe} {
-		key := component + "." + group
-		f.Groups[key] = GroupObj{Name: key, Parameters: map[string]Parameter{}}
+
+func setProbes(f Family, prefix string, readiness, liveness ProbeSettings) {
+	writeProbe(f, prefix+GroupNameReadinessProbe, readiness)
+	writeProbe(f, prefix+GroupNameLivenessProbe, liveness)
+}
+func writeProbe(f Family, group string, p ProbeSettings) {
+	put(f, group, "initialDelaySeconds", strconv.Itoa(p.InitialDelaySeconds))
+	put(f, group, "timeoutSeconds", strconv.Itoa(p.TimeoutSeconds))
+	put(f, group, "periodSeconds", strconv.Itoa(p.PeriodSeconds))
+	put(f, group, "failureThreshold", strconv.Itoa(p.FailureThreshold))
+	if p.SuccessThreshold > 0 {
+		put(f, group, "successThreshold", strconv.Itoa(p.SuccessThreshold))
 	}
-	resources := f.Groups[component+"."+GroupNameResources]
-	setPMMResourceValues(&resources)
-	f.Groups[resources.Name] = resources
-	readiness := f.Groups[component+"."+GroupNameReadinessProbe]
-	liveness := f.Groups[component+"."+GroupNameLivenessProbe]
-	factor := 1 + float64(c.request.Connections)/1000
-	putGroup(&readiness, "timeoutSeconds", strconv.Itoa(max(5, int(math.Ceil(15*factor)))))
-	putGroup(&liveness, "timeoutSeconds", strconv.Itoa(max(10, int(math.Ceil(30*factor)))))
-	f.Groups[readiness.Name] = readiness
-	f.Groups[liveness.Name] = liveness
-	c.families[FamilyTypeMonitor] = f
-}
-func (c *Configurator) setResources(f Family, cpu int, mem float64) {
-	put(f, GroupNameResources, "request_cpu", fmt.Sprintf("%dm", int(float64(cpu)*RequestPct)))
-	put(f, GroupNameResources, "limit_cpu", fmt.Sprintf("%dm", cpu))
-	put(f, GroupNameResources, "request_memory", strconv.FormatInt(int64(mem*RequestPct), 10))
-	put(f, GroupNameResources, "limit_memory", strconv.FormatInt(int64(mem), 10))
-}
-func (c *Configurator) setPMMResources(f Family) {
-	resources := f.Groups[GroupNameResources]
-	setPMMResourceValues(&resources)
-	f.Groups[resources.Name] = resources
-}
-func setPMMResourceValues(resources *GroupObj) {
-	putGroup(resources, "request_cpu", fmt.Sprintf("%dm", PMMRequestCPU))
-	putGroup(resources, "limit_cpu", fmt.Sprintf("%dm", PMMLimitCPU))
-	putGroup(resources, "request_memory", strconv.Itoa(PMMRequestMemory))
-	putGroup(resources, "limit_memory", strconv.Itoa(PMMLimitMemory))
-}
-func (c *Configurator) setPBMAgentResources(f Family) {
-	group := GroupObj{Name: "pbm-agent.resources", Parameters: map[string]Parameter{}}
-	putGroup(&group, "request_cpu", fmt.Sprintf("%dm", PBMAgentRequestCPU))
-	putGroup(&group, "limit_cpu", fmt.Sprintf("%dm", PBMAgentCPU))
-	putGroup(&group, "request_memory", strconv.FormatInt(int64(PBMAgentRequestMemory), 10))
-	putGroup(&group, "limit_memory", strconv.FormatInt(int64(PBMAgentMemory), 10))
-	f.Groups[group.Name] = group
-}
-func (c *Configurator) setProbes(f Family) {
-	factor := 1 + float64(c.request.Connections)/1000
-	put(f, "readinessProbe", "timeoutSeconds", strconv.Itoa(max(5, int(math.Ceil(15*factor)))))
-	put(f, "livenessProbe", "timeoutSeconds", strconv.Itoa(max(10, int(math.Ceil(30*factor)))))
-}
-func (c *Configurator) capacityPct() float64 {
-	d := c.dimension
-	mem := d.MongoDBMemory
-	if mem == 0 {
-		mem = d.MemoryBytes
+	if p.StartupDelaySeconds > 0 {
+		put(f, group, "startupDelaySeconds", strconv.Itoa(p.StartupDelaySeconds))
 	}
-	cpu := float64(d.MongoDBCpu)
-	if cpu == 0 {
-		cpu = float64(d.Cpu)
-	}
-	return math.Max(c.memoryUsed/mem, c.cpuUsed/cpu)
 }
-func connectionMemory(load int) float64 {
-	return []float64{0, 256 * 1024, 384 * 1024, 512 * 1024, 768 * 1024}[validLoad(load)]
-}
-func connectionCPU(load int) float64 { return []float64{0, 0.5, 0.8, 1.2, 1.6}[validLoad(load)] }
-func validLoad(x int) int {
-	if x < 1 || x > 4 {
-		return 2
+
+func floorMiB(bytes float64) float64  { return math.Floor(bytes/mib) * mib }
+func roundUp(x, step float64) float64 { return math.Ceil(x/step) * step }
+
+// formatBytes renders bytes for messages using the largest exact-enough binary unit.
+func formatBytes(bytes float64) string {
+	switch {
+	case bytes >= gib:
+		return strconv.FormatFloat(math.Round(bytes/gib*100)/100, 'f', -1, 64) + "Gi"
+	case bytes >= mib:
+		return strconv.FormatFloat(math.Round(bytes/mib), 'f', -1, 64) + "Mi"
+	default:
+		return strconv.FormatFloat(bytes, 'f', -1, 64) + "B"
 	}
-	return x
-}
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
