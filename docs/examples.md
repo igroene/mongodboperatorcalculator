@@ -991,7 +991,7 @@ The response has HTTP status `422`:
   "message": {
     "type": 3001,
     "name": "Resources do not fit the requested connection count under the selected workload assumptions",
-    "text": "estimated capacity exceeded: mongod at 7525% (CPU 7525%, memory 1784%); choose a larger dimension or reduce connections; assumes all 10000 open client connections use the selected workload profile"
+    "text": "estimated capacity exceeded (assumes all 10000 open client connections use the selected workload profile): mongod at 7525% (CPU 7525%, memory 1784%); choose a larger dimension or reduce connections"
   },
   "incoming": {
     "dbtype": "replica_set",

@@ -46,7 +46,7 @@ All calculator inputs are passed as a JSON request to `POST /calculator` or thro
 | `dimension.cpu` | integer | Conditional | Total pod CPU in millicores for dimension `999`, from `1` to `512000`. For predefined dimensions it may be omitted or must match the catalog value. |
 | `dimension.memory` | string | Conditional | Total pod memory for dimension `999`, for example `8Gi`, `8G`, `4096Mi`, or `8589934592`. For predefined dimensions it may be omitted or must match the catalog value. |
 | `loadtype.id` | integer | Yes | Workload profile `1` through `4`. |
-| `connections` | integer | Yes | Peak simultaneously open client connections, including idle driver-pool sockets, from `1` to `1000000`. Every connection receives the selected workload's CPU and memory allowance. For replica sets, use the count on the member being sized; for sharded clusters, use the total across all `mongos`. |
+| `connections` | integer | Yes | Peak simultaneously open client connections, including idle driver-pool sockets, from `1` to `1000000`. Every connection receives the selected workload's CPU and memory allowance. For replica sets, use the count on the busiest member, including driver monitoring sockets from every application instance; for sharded clusters, use the total across all `mongos`. See [Choosing the connection count](sizing.md#choosing-the-connection-count). |
 | `mongodbversion.major` | integer | Yes | Supported major version: `7` or `8`. |
 | `mongodbversion.minor` | integer | Yes | MongoDB minor version, `0` to `99`. |
 | `mongodbversion.patch` | integer | Yes | MongoDB patch version, `0` to `99`. |
@@ -127,10 +127,12 @@ Diagnostic status information:
 |---:|---|
 | `1001` | Estimated utilization is at or below 85%. |
 | `2001` | Estimated utilization is above 85% and at or below 100%. |
-| `3001` | Estimated utilization is above 100%, or `mongod` does not fit in the dimension; `answer` is empty. |
+| `3001` | Estimated utilization is above 100%, or `mongod` does not fit in the dimension; `answer` is empty. Only the first case states the connection assumption in `text`. |
 | `5001` | The request parsed but is invalid or unsupported. |
 | `6001` | Compatibility code from the MySQL calculator; not emitted. |
 | `7001` | Compatibility code from the MySQL calculator; not emitted. |
+
+Branch on `type` only. `name` and `text` are human-readable and may change between releases; for example, their wording changed when `connections` was redefined as total open connections.
 
 ### `incoming`
 

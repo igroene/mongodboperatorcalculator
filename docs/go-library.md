@@ -44,7 +44,7 @@ func main() {
 }
 ```
 
-The public `Init()` signature is intentionally compatible with the MySQL calculator. Validation and calculation errors are returned by `GetCalculate()`. Unlike the HTTP API, the Go API cannot reject unknown fields; everything else is validated the same way.
+The public `Init()` signature is intentionally compatible with the MySQL calculator. Validation and calculation errors are returned by `GetCalculate()`. Use `message.MType` to tell an overload (`3001`) from an invalid request (`5001`); the error text and `message.MName`/`message.MText` are descriptive and may change between releases. Unlike the HTTP API, the Go API cannot reject unknown fields; everything else is validated the same way.
 
 ## Fetch supported metadata
 

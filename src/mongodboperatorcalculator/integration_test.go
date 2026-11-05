@@ -64,17 +64,16 @@ func TestTotalOpenConnectionScenarios(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for family, count := range map[string]int{FamilyTypeMongoDB: tc.connections, FamilyTypeMongos: tc.connections} {
-				if family == FamilyTypeMongos {
-					if tc.mongos == 0 {
-						continue
-					}
-					count = (count + tc.mongos - 1) / tc.mongos
-				}
+			assertAdmits := func(family string, open int) {
+				t.Helper()
 				limit, err := strconv.Atoi(param(t, families, family, GroupNameConfiguration, "net.maxIncomingConnections"))
-				if err != nil || limit <= count {
-					t.Fatalf("%s connection limit %d must admit %d open connections with headroom: %v", family, limit, count, err)
+				if err != nil || limit <= open {
+					t.Fatalf("%s connection limit %d must admit %d open connections with headroom: %v", family, limit, open, err)
 				}
+			}
+			assertAdmits(FamilyTypeMongoDB, tc.connections)
+			if tc.mongos > 0 {
+				assertAdmits(FamilyTypeMongos, (tc.connections+tc.mongos-1)/tc.mongos)
 			}
 		})
 	}

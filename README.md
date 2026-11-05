@@ -15,7 +15,7 @@ Provide a pod resource budget, workload profile, and peak total open client conn
 
 Two inputs are especially important:
 
-- **`connections` means peak simultaneously open client connections, including idle driver-pool sockets.** Every connection receives the selected profile's CPU and memory allowance, assuming it may become busy. For replica sets, use the count expected on the member being sized; for sharded clusters, use the total across all `mongos`.
+- **`connections` means peak simultaneously open client connections, including idle driver-pool sockets.** Every connection receives the selected profile's CPU and memory allowance, assuming it may become busy. For replica sets, use the count expected on the busiest member, including about two driver monitoring sockets per application instance; for sharded clusters, use the total across all `mongos`. See [Choosing the connection count](docs/sizing.md#choosing-the-connection-count).
 - **A dimension budgets one replica-set or shard `mongod` pod**, including PMM and optional PBM. Results are per component, not cluster totals; no shard count or replica-set member count is assumed. Config-server and `mongos` pods are sized separately.
 
 ## Quick start

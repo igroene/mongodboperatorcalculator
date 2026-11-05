@@ -188,11 +188,11 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 		}
 	}
 	if worst > 1 {
-		text := "estimated capacity exceeded: " + c.overloadDetails() + c.connectionAssumption()
+		text := fmt.Sprintf("estimated capacity exceeded (%s): %s", c.connectionAssumption(), c.overloadDetails())
 		return ResponseMessage{OverutilizingI, OverutilizingT, text}, nil, fmt.Errorf("requested connection count exceeds resources under the selected workload assumptions")
 	}
 	c.populate()
-	text := fmt.Sprintf("estimated capacity utilization is %.0f%% (%s)", worst*100, c.utilizationDetails()) + c.connectionAssumption()
+	text := fmt.Sprintf("estimated capacity utilization is %.0f%% (%s); %s", worst*100, c.utilizationDetails(), c.connectionAssumption())
 	if worst > CloseLimitPct {
 		return ResponseMessage{ClosetolimitI, ClosetolimitT, text}, c.families, nil
 	}
@@ -200,7 +200,7 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 }
 
 func (c *Configurator) connectionAssumption() string {
-	return fmt.Sprintf("; assumes all %d open client connections use the selected workload profile", c.request.Connections)
+	return fmt.Sprintf("assumes all %d open client connections use the selected workload profile", c.request.Connections)
 }
 
 func (c *Configurator) utilizationDetails() string {
