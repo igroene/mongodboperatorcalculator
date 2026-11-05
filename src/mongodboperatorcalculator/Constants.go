@@ -1,7 +1,11 @@
 package mongodboperatorcalculator
 
 const (
-	VERSION = "v0.2.0"
+	VERSION = "v0.3.0"
+
+	// OperatorVersion is the Percona Operator for MongoDB release whose
+	// runtime behavior the calculator output is verified against.
+	OperatorVersion = "1.23.0"
 
 	OkI                    = 1001
 	ClosetolimitI          = 2001
@@ -38,6 +42,7 @@ const (
 	GroupNameResources      = "resources"
 	GroupNameReadinessProbe = "readinessProbe"
 	GroupNameLivenessProbe  = "livenessProbe"
+	GroupNameStorage        = "storage"
 	GroupNamePBMResources   = "pbm-agent.resources"
 	// GroupNameProbes is retained for source compatibility. Probe values are
 	// emitted in the readinessProbe and livenessProbe groups.
@@ -46,15 +51,17 @@ const (
 	ResultOutputFormatJson  = "json"
 	ResultOutputFormatHuman = "human"
 
-	// MongoDB documents 50% as a useful upper bound for container-aware cache sizing.
-	WiredTigerCachePct = 0.50
-	// MinCacheSizeGB is the smallest value mongod accepts for cacheSizeGB.
+	// WiredTigerCacheRatio is the operator's default
+	// storage.wiredTiger.engineConfig.cacheSizeRatio. The operator passes
+	// --wiredTigerCacheSizeGB = ratio x (memory limit - 1GiB) to mongod.
+	WiredTigerCacheRatio = 0.5
+	// MinCacheSizeGB is the floor the operator and mongod apply to the cache.
 	MinCacheSizeGB = 0.25
 	RequestPct     = 0.95
 	CloseLimitPct  = 0.85
 
-	// Smallest mongod container the calculator will recommend. A 512Mi limit
-	// is the smallest that still yields the 0.25GB WiredTiger cache minimum.
+	// Smallest mongod container the calculator will recommend. At 512Mi the
+	// operator's 0.25GB minimum cache still leaves 256Mi outside the cache.
 	MinMongodCPU    = 250
 	MinMongodMemory = 512 * mib
 
@@ -70,7 +77,10 @@ const (
 	// health checks, PMM, PBM, and administrative sessions.
 	ConnectionHeadroomPct      = 1.15
 	InternalConnectionOverhead = 100
-	// Idle pool connections that every mongos keeps to each shard and config server.
+	// Calculator assumptions, not MongoDB defaults: the number of pooled
+	// connections each mongos is expected to hold to one shard member and one
+	// config-server member. Real pools depend on taskExecutorPoolSize,
+	// ShardingTaskExecutorPool* settings, and the workload.
 	MongosPoolConnectionsPerShard  = 10
 	MongosPoolConnectionsPerConfig = 20
 
@@ -91,10 +101,8 @@ const (
 	MongosMaxCPU            = 16000
 	MongosMaxMemory         = 32 * gib
 
-	// Shard members at or above this memory limit get at least the second config-server tier.
-	ConfigLargeShardMemory = 32 * gib
-
-	// Percona Operator for MongoDB default sidecar resources.
+	// Sidecar resources. The operator has no built-in defaults for these; the
+	// values are the recommendations from the operator's sample deploy/cr.yaml.
 	PMMRequestCPU         = 300
 	PMMLimitCPU           = 400
 	PMMRequestMemory      = 150 * 1000 * 1000
@@ -125,7 +133,9 @@ var ConfigServerTiers = []ConfigServerTier{
 	{8000, 16 * gib},
 }
 
-// Probe settings match the Percona Operator for MongoDB defaults.
+// Probe settings match the runtime defaults that Percona Operator for MongoDB
+// 1.23.0 applies when the custom resource leaves a probe unset. A zero
+// FailureThreshold or SuccessThreshold is omitted from the output.
 type ProbeSettings struct {
 	InitialDelaySeconds int
 	TimeoutSeconds      int
@@ -136,9 +146,12 @@ type ProbeSettings struct {
 }
 
 var (
-	MongodLivenessProbe       = ProbeSettings{InitialDelaySeconds: 60, TimeoutSeconds: 10, PeriodSeconds: 30, FailureThreshold: 4, StartupDelaySeconds: 7200}
-	ReplicaSetReadinessProbe  = ProbeSettings{InitialDelaySeconds: 10, TimeoutSeconds: 2, PeriodSeconds: 3, FailureThreshold: 8, SuccessThreshold: 1}
-	ShardedComponentReadiness = ProbeSettings{InitialDelaySeconds: 10, TimeoutSeconds: 2, PeriodSeconds: 3, FailureThreshold: 3, SuccessThreshold: 1}
-	PMMLivenessProbe          = ProbeSettings{InitialDelaySeconds: 60, TimeoutSeconds: 5, PeriodSeconds: 10, FailureThreshold: 5}
-	PMMReadinessProbe         = ProbeSettings{InitialDelaySeconds: 5, TimeoutSeconds: 1, PeriodSeconds: 10, FailureThreshold: 3, SuccessThreshold: 1}
+	MongodLivenessProbe        = ProbeSettings{InitialDelaySeconds: 60, TimeoutSeconds: 10, PeriodSeconds: 30, FailureThreshold: 4, StartupDelaySeconds: 7200}
+	MongosLivenessProbe        = ProbeSettings{InitialDelaySeconds: 60, TimeoutSeconds: 10, PeriodSeconds: 30, FailureThreshold: 4, StartupDelaySeconds: 10}
+	ReplicaSetReadinessProbe   = ProbeSettings{InitialDelaySeconds: 10, TimeoutSeconds: 2, PeriodSeconds: 3, FailureThreshold: 8, SuccessThreshold: 1}
+	ConfigServerReadinessProbe = ProbeSettings{InitialDelaySeconds: 10, TimeoutSeconds: 2, PeriodSeconds: 3, FailureThreshold: 3, SuccessThreshold: 1}
+	MongosReadinessProbe       = ProbeSettings{InitialDelaySeconds: 10, TimeoutSeconds: 1, PeriodSeconds: 1, FailureThreshold: 3, SuccessThreshold: 1}
+	// The operator sets no failureThreshold for the PMM liveness probe, so
+	// Kubernetes applies its default of 3. PMM has no readiness probe by default.
+	PMMLivenessProbe = ProbeSettings{InitialDelaySeconds: 60, TimeoutSeconds: 5, PeriodSeconds: 10, FailureThreshold: 3}
 )

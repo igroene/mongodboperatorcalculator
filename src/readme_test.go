@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,9 @@ var updateReadme = flag.Bool("update-readme", false, "rewrite README response ex
 
 // README examples are marked with <!-- request:NAME --> and
 // <!-- response:NAME --> comments, each directly followed by a fenced block.
-var readmeBlock = regexp.MustCompile("(?s)<!-- (request|response):([a-z0-9-]+) -->\n```([a-z]*)\n(.*?)```")
+// A response marker may carry the expected HTTP status, for example
+// <!-- response:overload status=422 -->; it defaults to 200.
+var readmeBlock = regexp.MustCompile("(?s)<!-- (request|response):([a-z0-9-]+)(?: status=([0-9]+))? -->\n```([a-z]*)\n(.*?)```")
 
 func TestReadmeExamplesMatchOutput(t *testing.T) {
 	path := "../README.md"
@@ -29,7 +32,7 @@ func TestReadmeExamplesMatchOutput(t *testing.T) {
 	requests := map[string]string{}
 	for _, m := range readmeBlock.FindAllStringSubmatch(readme, -1) {
 		if m[1] == "request" {
-			requests[m[2]] = m[4]
+			requests[m[2]] = m[5]
 		}
 	}
 	if len(requests) == 0 {
@@ -41,16 +44,23 @@ func TestReadmeExamplesMatchOutput(t *testing.T) {
 		if m[1] != "response" {
 			return block
 		}
-		name, lang, documented := m[2], m[3], m[4]
+		name, status, lang, documented := m[2], m[3], m[4], m[5]
 		seen[name] = true
 		body, ok := requests[name]
 		if !ok {
 			t.Errorf("README response %q has no matching request", name)
 			return block
 		}
+		wantStatus := http.StatusOK
+		if status != "" {
+			wantStatus, _ = strconv.Atoi(status)
+		}
 		req := httptest.NewRequest(http.MethodPost, "/calculator", strings.NewReader(body))
 		res := httptest.NewRecorder()
 		routes(newLogger("ERROR")).ServeHTTP(res, req)
+		if res.Code != wantStatus {
+			t.Errorf("README example %q documents HTTP %d, got %d", name, wantStatus, res.Code)
+		}
 		actual := res.Body.String()
 		if lang == "json" {
 			var pretty bytes.Buffer
@@ -73,7 +83,11 @@ func TestReadmeExamplesMatchOutput(t *testing.T) {
 		if !strings.HasSuffix(actual, "\n") {
 			actual += "\n"
 		}
-		return "<!-- response:" + name + " -->\n```" + lang + "\n" + actual + "```"
+		marker := "<!-- response:" + name
+		if status != "" {
+			marker += " status=" + status
+		}
+		return marker + " -->\n```" + lang + "\n" + actual + "```"
 	})
 	for name := range requests {
 		if !seen[name] {

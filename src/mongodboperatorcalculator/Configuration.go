@@ -249,9 +249,3 @@ func put(f Family, group, key, value string) {
 func putGroup(g *GroupObj, key, value string) {
 	g.Parameters[key] = Parameter{Name: key, Value: value}
 }
-
-// formatGB renders bytes as binary gigabytes, rounded down to two decimals so
-// the emitted cache never exceeds the computed share of the memory limit.
-func formatGB(bytes float64) string {
-	return strconv.FormatFloat(math.Floor(bytes/float64(gib)*100+1e-9)/100, 'f', -1, 64)
-}
