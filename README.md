@@ -20,7 +20,7 @@ It mirrors the public API shape of the MySQL Operator Calculator while using Mon
 
 The calculator turns a connection count and a workload profile into resource sizes using a simple, uncalibrated heuristic. The utilization it reports is an estimate of resource pressure under that heuristic, not a measured or guaranteed capacity:
 
-- `connections` is the number of client connections expected to be busy at the same time. Idle connections in a driver pool cost far less than the model assumes, and a single expensive query can cost far more.
+- `connections` is the number of client connections expected to be busy at the same time. Idle connections in a driver pool cost far less than the model assumes, and a single expensive query can cost far more. The generated `net.maxIncomingConnections` also uses this busy count; it does not explicitly account for idle driver-pool sockets. Before applying the output, raise that limit as needed to cover the peak number of open connections to each component, including idle sockets.
 - The per-connection CPU and memory figures are fixed assumptions. They have not been calibrated against benchmarks.
 - The model does not see working-set size, query shapes, index coverage, storage latency, replication lag, backup or balancer activity, or network limits. Any of these can saturate a deployment that the calculator reports as comfortable.
 
