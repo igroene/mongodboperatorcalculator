@@ -14,9 +14,9 @@ const (
 	ConnectionRecalculated = 6001 // retained for response compatibility; never emitted by this calculator
 	ResourcesRecalculated  = 7001 // retained for response compatibility; never emitted by this calculator
 
-	OkT             = "Execution was successful and resources match the requested workload"
-	ClosetolimitT   = "Execution was successful however resources are close to saturation"
-	OverutilizingT  = "Resources are not enough to cover the requested workload"
+	OkT             = "Configuration fits the requested connection count under the selected workload assumptions"
+	ClosetolimitT   = "Configuration is close to capacity under the selected workload assumptions"
+	OverutilizingT  = "Resources do not fit the requested connection count under the selected workload assumptions"
 	InvalidRequestT = "Invalid request"
 	// ErrorexecT is retained for source compatibility with the MySQL calculator.
 	ErrorexecT = "There is an error while processing. See details: %s"
@@ -88,7 +88,8 @@ const (
 	MongodBaseOverheadMemory = 128 * mib
 	MongodOverheadPct        = 0.05
 	MongodBaseCPU            = 100
-	// Every connection uses about 1MiB of thread stack, plus load-dependent working memory.
+	// Reserve a 1MiB baseline stack allowance per connection, plus load-dependent
+	// working memory. This is a sizing assumption, not measured resident memory.
 	ConnectionStackMemory = 1 * mib
 
 	// mongos is sized so that the estimated load stays at this share of its limit.

@@ -2,7 +2,7 @@
 
 Calculate starting-point CPU, memory, and configuration values for Percona Server for MongoDB deployments managed by the Percona Operator for MongoDB. Use it as an HTTP service or embed it in a Go application.
 
-Provide a pod resource budget, workload profile, and expected busy connection count. The calculator allocates resources to `mongod` and its PMM/PBM sidecars and returns resource requests, limits, probes, and MongoDB settings. For sharded clusters, it also sizes config-server members and `mongos` routers separately.
+Provide a pod resource budget, workload profile, and peak total open client connection count. The calculator checks whether the budget fits that count under the selected workload assumptions, allocates resources to `mongod` and its PMM/PBM sidecars, and returns resource requests, limits, probes, and MongoDB settings. For sharded clusters, it also sizes config-server members and `mongos` routers separately.
 
 ## Compatibility and limitations
 
@@ -15,7 +15,7 @@ Provide a pod resource budget, workload profile, and expected busy connection co
 
 Two inputs are especially important:
 
-- **`connections` means simultaneously busy client connections**, not the total size of idle driver pools. For sharded clusters, it is the total across all `mongos`.
+- **`connections` means peak simultaneously open client connections, including idle driver-pool sockets.** Every connection receives the selected profile's CPU and memory allowance, assuming it may become busy. For replica sets, use the count expected on the member being sized; for sharded clusters, use the total across all `mongos`.
 - **A dimension budgets one replica-set or shard `mongod` pod**, including PMM and optional PBM. Results are per component, not cluster totals; no shard count or replica-set member count is assumed. Config-server and `mongos` pods are sized separately.
 
 ## Quick start
@@ -35,7 +35,7 @@ Without flags, the service listens on `0.0.0.0:8080`. It stops gracefully on `SI
 
 ### 2. Submit a calculation
 
-In another terminal, request a replica-set member with a `2000m` CPU / `8Gi` pod budget (dimension `4`), Light OLTP workload (profile `2`), and 500 busy connections:
+In another terminal, request a replica-set member with a `2000m` CPU / `8Gi` pod budget (dimension `4`), Light OLTP workload (profile `2`), and 500 total open client connections:
 
 ```bash
 curl -sS -X POST -H 'Content-Type: application/json' \
@@ -66,8 +66,8 @@ For this request, the `message` section is:
 ```json
 {
   "type": 1001,
-  "name": "Execution was successful and resources match the requested workload",
-  "text": "estimated capacity utilization is 38% (CPU 38%, memory 28%)"
+  "name": "Configuration fits the requested connection count under the selected workload assumptions",
+  "text": "estimated capacity utilization is 38% (CPU 38%, memory 28%); assumes all 500 open client connections use the selected workload profile"
 }
 ```
 
@@ -89,7 +89,7 @@ Malformed requests use a separate `error` object. See [error formats](docs/api.m
 Before applying results:
 
 - Change the WiredTiger cache through `storage.wiredTiger.engineConfig.cacheSizeRatio`. The reported `cacheSizeGB` is informational; the operator overrides a value placed in `configuration`.
-- Check `net.maxIncomingConnections` against the peak number of open connections to each component, including idle driver-pool sockets. The generated limit uses the busy connection count and does not explicitly budget for idle sockets.
+- Check `net.maxIncomingConnections` against the peak open connections to each component. It includes headroom above the supplied client count and an internal allowance; larger internal pools may require adjustment. Headroom permits extra connections but does not reserve workload capacity for them.
 - Disable the log collector or budget for both of its containers separately. Custom sidecars are also outside the calculator's budget.
 - Configure authentication, TLS, storage, replication, and backup policy separately, then test the deployment under load.
 

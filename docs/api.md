@@ -46,7 +46,7 @@ All calculator inputs are passed as a JSON request to `POST /calculator` or thro
 | `dimension.cpu` | integer | Conditional | Total pod CPU in millicores for dimension `999`, from `1` to `512000`. For predefined dimensions it may be omitted or must match the catalog value. |
 | `dimension.memory` | string | Conditional | Total pod memory for dimension `999`, for example `8Gi`, `8G`, `4096Mi`, or `8589934592`. For predefined dimensions it may be omitted or must match the catalog value. |
 | `loadtype.id` | integer | Yes | Workload profile `1` through `4`. |
-| `connections` | integer | Yes | Client connections expected to be busy at the same time, from `1` to `1000000`. For sharded clusters this is the total across all `mongos`. |
+| `connections` | integer | Yes | Peak simultaneously open client connections, including idle driver-pool sockets, from `1` to `1000000`. Every connection receives the selected workload's CPU and memory allowance. For replica sets, use the count on the member being sized; for sharded clusters, use the total across all `mongos`. |
 | `mongodbversion.major` | integer | Yes | Supported major version: `7` or `8`. |
 | `mongodbversion.minor` | integer | Yes | MongoDB minor version, `0` to `99`. |
 | `mongodbversion.patch` | integer | Yes | MongoDB patch version, `0` to `99`. |
