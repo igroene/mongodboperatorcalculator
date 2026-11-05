@@ -6,11 +6,42 @@
 
 The calculator turns a connection count and a workload profile into resource sizes using a simple, uncalibrated heuristic. The utilization it reports is an estimate of resource pressure under that heuristic, not a measured or guaranteed capacity:
 
-- `connections` is the number of client connections expected to be busy at the same time. Idle connections in a driver pool cost far less than the model assumes, and a single expensive query can cost far more. The generated `net.maxIncomingConnections` also uses this busy count; it does not explicitly account for idle driver-pool sockets. Before applying the output, raise that limit as needed to cover the peak number of open connections to each component, including idle sockets.
+- `connections` is the peak number of simultaneously open client connections, including idle driver-pool sockets. Every supplied connection receives the selected workload's CPU and memory allowance, assuming it may become busy. There is no active/idle ratio or CPU-derived memory discount. This is conservative for mostly idle pools.
+- A successful result means the configuration fits the requested connection count under the selected workload assumptions. Operations that exceed the per-connection allowances require additional resources; sizing those operations is the user's responsibility.
 - The per-connection CPU and memory figures are fixed assumptions. They have not been calibrated against benchmarks.
 - The model does not see working-set size, query shapes, index coverage, storage latency, replication lag, backup or balancer activity, or network limits. Any of these can saturate a deployment that the calculator reports as comfortable.
 
 Use the output as a starting point, then validate it with a load test and monitoring (for example PMM) before production use.
+
+### Choosing the connection count
+
+For a replica set, supply the peak client connections expected on the member being sized, including failover and planned application growth. Every member uses the same custom resource and gets the same size, so use the busiest member, normally the primary after a failover, when it receives the connections previously spread over other members. Do not sum connections across all replica-set members. Drivers keep a separate pool for each member, so with `readPreference: primary` the application pools land on the primary, while secondary reads open pools on the secondaries as well.
+
+Every `MongoClient` also holds monitoring connections to *every* replica-set member: one or two each, depending on the driver and server version. They are idle most of the time, but they count against `net.maxIncomingConnections` on every member, including secondaries that serve no reads. The fixed `+100` in the generated limit is meant for MongoDB-internal, operator, PMM, PBM, and admin connections, not for these. As a rule of thumb, add about `2 × number of application instances` (more precisely, `MongoClient` instances) to the `connections` input. With 200 application instances, monitoring sockets alone are about 400 connections per member, much more than the fixed allowance.
+
+For a sharded cluster, supply the total client connections across all `mongos`; the model splits them evenly between routers. Application pools and monitoring sockets connect to `mongos`, not to shards. The model nonetheless lets the full client count reach any one shard, a worst case that is conservative for large idle pools; see [Shard and replica-set `mongod`](#shard-and-replica-set-mongod).
+
+Use peak-period `db.serverStatus().connections.current` on the busiest member as a starting point. It already includes driver monitoring sockets but also includes internal connections; to separate them, group `db.currentOp({"$all": true})` output by `clientMetadata.driver.name` and `appName` (internal connections have no driver metadata), or use the connection panels in PMM. Do not use `connections.active` alone or the cumulative `connections.totalCreated` counter. For planned deployments, estimate the sockets application instances and their driver pools will hold open concurrently (`maxPoolSize` per instance per member it reads from, plus monitoring sockets), rather than summing operations over time.
+
+For example, a replica-set member expecting 1,000 open client connections, of which 100 are currently busy, should use `connections: 1000`. Light OLTP reserves `1000 × (1Mi + 0.5Mi) = 1500Mi` for those connections, plus fixed overhead and WiredTiger cache. It also budgets `1100m` CPU including the `100m` base and generates `net.maxIncomingConnections: 1250`. It does not discount the 900 currently idle sockets.
+
+Earlier documentation defined this input as busy connections only. Users following that guidance should now supply their peak total open client count. The sizing coefficients and formulas are unchanged; a larger input can change the capacity verdict.
+
+### Example capacity checks
+
+These replica-set scenarios use Light OLTP, PMM enabled, no backup, and no provider overhead. CPU and memory budgets are per pod; the percentages are the model's `mongod` estimates after PMM is deducted. Memory pressure is measured against the non-cache budget, not total pod memory.
+
+| Pod CPU / memory | Total open clients | CPU pressure | Memory pressure | Result |
+|---|---:|---:|---:|---|
+| `2000m / 8Gi` | 1,000 | 69% | 45% | Fits |
+| `2000m / 8Gi` | 1,300 | 88% | 55% | Close to limit |
+| `2000m / 8Gi` | 1,600 | 106% | 65% | Insufficient CPU |
+| `4000m / 8Gi` | 1,600 | 47% | 65% | Fits |
+| `16000m / 2Gi` | 1,000 | 7% | 122% | Insufficient memory |
+| `32000m / 2Gi` | 1,000 | 3% | 122% | Still insufficient memory |
+| `16000m / 4Gi` | 1,000 | 7% | 75% | Fits |
+
+More CPU does not reduce the connection-memory allowance. More connections increase pressure; a larger budget can accommodate them. `TestTotalOpenConnectionScenarios` checks these decisions, heavier-write workloads, and sharded routing. In the sharded cases, adding routers lowers each `mongos` share but not the shard estimate, because of the worst-case shard assumption described in [Shard and replica-set `mongod`](#shard-and-replica-set-mongod). These are calculator consistency checks, not database benchmarks.
 
 ## Pod budget and sidecars
 
@@ -51,7 +82,11 @@ See the [dedicated example](examples.md#complete-dedicated-example).
 
 - Resources: the dimension minus `providercostpct` and the sidecar limits (see [Pod budget and sidecars](#pod-budget-and-sidecars)).
 - WiredTiger cache: the operator always starts `mongod` with `--wiredTigerCacheSizeGB`, which overrides any `cacheSizeGB` in the configuration. The value is `max(0.25, floor(cacheSizeRatio × (memory limit − 1Gi)) / 1Gi)`, printed with two decimals, where `cacheSizeRatio` defaults to `0.5`. The calculator uses the same formula, emits `cacheSizeRatio` in the `storage` group, and reports the resulting `cacheSizeGB` so you can see what `mongod` will run with. Change the cache with `cacheSizeRatio`, not `cacheSizeGB`.
-- `net.maxIncomingConnections`: `ceil(connections × 1.15) + 100`. The fixed `100` covers replica-set members, operator health checks, PMM, PBM, and admin sessions. In sharded clusters the shard also adds an assumed `10` pool connections per `mongos` (see [Connection pool assumptions](#connection-pool-assumptions)). Client connections still count in full, because every client operation can reach the same shard through `mongos`.
+- `net.maxIncomingConnections`: `ceil(connections × 1.15) + 100`. The fixed `100` covers replica-set members, operator health checks, PMM, PBM, and admin sessions; it does not cover driver monitoring sockets, which belong in `connections` (see [Choosing the connection count](#choosing-the-connection-count)). In sharded clusters the shard also adds an assumed `10` pool connections per `mongos` (see [Connection pool assumptions](#connection-pool-assumptions)).
+
+In sharded clusters, the shard workload estimate and connection limit both use the full client count. This is a deliberate worst case, not a model of real traffic: client sockets end at `mongos`, and a shard only sees the `mongos` task executor pools, which grow with operations in flight rather than with open client sockets. Idle client sockets never reach a shard. For applications with large, mostly idle pools, the shard estimate is therefore conservative twice over: once for idle sockets on `mongos`, and again for traffic that never reaches the shard. A separate per-shard concurrency input is tracked in [#5](https://github.com/igroene/mongodboperatorcalculator/issues/5).
+
+The connection limit provides admission headroom, not additional workload capacity. CPU and memory are evaluated for the supplied client count, not for every connection allowed by the generated limit. Internal activity is represented by the fixed overhead and pool assumptions, not by a full client-workload allowance for every reserved internal slot. Increasing the client count does not automatically grow the `mongod` memory limit or change its cache ratio; it increases estimated pressure against the supplied budget.
 
 ### Config server
 
@@ -119,11 +154,11 @@ Every component gets a CPU and a memory utilization estimate. The reported figur
 | `3` | Heavy OLTP | `2m` | `1Mi` |
 | `4` | Mainly Writes | `3m` | `1.5Mi` |
 
-Every connection also counts `1Mi` for its thread stack.
+Every client connection also counts a `1Mi` baseline stack allowance. These figures are sizing allowances, not measured resident memory or per-operation limits. Working-memory allowances apply even to currently idle client connections.
 
-- **CPU:** `100m + connections × CPU per connection`, divided by the CPU limit.
+- **CPU:** `100m + connections × CPU per connection`, divided by the CPU limit. The coefficient is the assumed average CPU demand per connection under the selected profile, not a measurement or a claim that every executing query uses this much CPU. Large idle pools can fail this conservative check even when their observed CPU use is low.
 - **Memory:** the WiredTiger cache is an allocation, not load, so memory is measured against what is left outside the cache. The estimate is `128Mi + 5% of the memory limit + connections × (1Mi + working memory per connection)`, divided by `memory limit − cache`, where the cache is the operator-derived value described in [Sizing Rules](#shard-and-replica-set-mongod).
-- **Idle pool connections:** in sharded clusters, the shard counts the assumed `10` pool connections per `mongos`. Each costs `1Mi` of stack memory but no CPU, so a high `mongos.count` can push a small shard towards its limit even with little client traffic.
+- **Additional internal idle pools:** in sharded clusters, the shard counts the assumed `10` pool connections per `mongos` separately from the supplied client count. Each gets `1Mi` of stack allowance but no additional CPU, so a high `mongos.count` can push a small shard towards its limit even with little client traffic.
 
 The headline utilization is the shard or replica-set `mongod` estimate. `mongos` and the config server are sized by the calculator, so they only count toward the headline once even their largest size is above 85%. Sharded results list all three components in the message text.
 
@@ -133,4 +168,4 @@ The headline utilization is the shard or replica-set `mongod` estimate. `mongos`
 | Above 85%, up to 100% | `2001` | `200` |
 | Above 100%, or `mongod` below its minimum | `3001` | `422` |
 
-A `3001` response has an empty `answer` object. The message text names each overloaded component. The thresholds apply to the heuristic estimate; a `1001` result is not a guarantee that the workload fits.
+A `3001` response has an empty `answer` object. When the estimate exceeds 100%, the message text names each overloaded component and states the connection assumption. When `mongod` does not fit in the dimension, the connection count plays no part, so the text explains the budget shortfall and has no connection assumption. The thresholds apply to the heuristic estimate; a `1001` result is not a guarantee that the workload fits.

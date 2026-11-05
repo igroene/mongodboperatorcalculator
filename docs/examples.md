@@ -43,8 +43,8 @@ Expected output:
 {
   "message": {
     "type": 1001,
-    "name": "Execution was successful and resources match the requested workload",
-    "text": "estimated capacity utilization is 38% (CPU 38%, memory 28%)"
+    "name": "Configuration fits the requested connection count under the selected workload assumptions",
+    "text": "estimated capacity utilization is 38% (CPU 38%, memory 28%); assumes all 500 open client connections use the selected workload profile"
   },
   "incoming": {
     "dbtype": "replica_set",
@@ -269,8 +269,8 @@ Expected output. Every component is an independent pod; no shard count or replic
 {
   "message": {
     "type": 1001,
-    "name": "Execution was successful and resources match the requested workload",
-    "text": "estimated capacity utilization is 48% (shard mongod 48%, config server 20%, mongos 69%)"
+    "name": "Configuration fits the requested connection count under the selected workload assumptions",
+    "text": "estimated capacity utilization is 48% (shard mongod 48%, config server 20%, mongos 69%); assumes all 1500 open client connections use the selected workload profile"
   },
   "incoming": {
     "dbtype": "sharded_cluster",
@@ -813,8 +813,8 @@ Expected output:
 {
   "message": {
     "type": 1001,
-    "name": "Execution was successful and resources match the requested workload",
-    "text": "estimated capacity utilization is 23% (CPU 19%, memory 23%)"
+    "name": "Configuration fits the requested connection count under the selected workload assumptions",
+    "text": "estimated capacity utilization is 23% (CPU 19%, memory 23%); assumes all 100 open client connections use the selected workload profile"
   },
   "incoming": {
     "dbtype": "replica_set",
@@ -990,8 +990,8 @@ The response has HTTP status `422`:
 {
   "message": {
     "type": 3001,
-    "name": "Resources are not enough to cover the requested workload",
-    "text": "estimated capacity exceeded: mongod at 7525% (CPU 7525%, memory 1784%); choose a larger dimension or reduce connections"
+    "name": "Resources do not fit the requested connection count under the selected workload assumptions",
+    "text": "estimated capacity exceeded (assumes all 10000 open client connections use the selected workload profile): mongod at 7525% (CPU 7525%, memory 1784%); choose a larger dimension or reduce connections"
   },
   "incoming": {
     "dbtype": "replica_set",
@@ -1059,7 +1059,7 @@ The response has HTTP status `422`:
 {
   "message": {
     "type": 3001,
-    "name": "Resources are not enough to cover the requested workload",
+    "name": "Resources do not fit the requested connection count under the selected workload assumptions",
     "text": "dimension XSmall (600m/1Gi) leaves 200m CPU and 779Mi memory for mongod after PMM 400m/244Mi; the minimum is 250m and 512Mi; choose a larger dimension or set mongodbdedicated"
   },
   "incoming": {
@@ -1194,9 +1194,9 @@ Set `output` to `human` to receive sections suitable for mapping into a Percona 
 <!-- response:human -->
 ```ini
 [message]
-name = Execution was successful and resources match the requested workload
+name = Configuration fits the requested connection count under the selected workload assumptions
 type = 1001
-text = estimated capacity utilization is 46% (CPU 46%, memory 31%)
+text = estimated capacity utilization is 46% (CPU 46%, memory 31%); assumes all 500 open client connections use the selected workload profile
 
 [mongod.configuration]
 net.maxIncomingConnections = 675

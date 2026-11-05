@@ -1,10 +1,83 @@
 package mongodboperatorcalculator
 
 import (
+	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// Exercise capacity decisions for total open connections, including idle client
+// sockets. The same count must be used for workload sizing and admission limits.
+func TestTotalOpenConnectionScenarios(t *testing.T) {
+	cases := []struct {
+		name        string
+		cpu         int
+		memory      string
+		connections int
+		load        int
+		mongos      int
+		wantType    int
+		wantDetail  string
+	}{
+		{"small pool", 2000, "8Gi", 100, 2, 0, OkI, "CPU 12%, memory 15%"},
+		{"1000 open including idle", 2000, "8Gi", 1000, 2, 0, OkI, "CPU 69%, memory 45%"},
+		{"near CPU limit", 2000, "8Gi", 1300, 2, 0, ClosetolimitI, "CPU 88%, memory 55%"},
+		{"too many for CPU", 2000, "8Gi", 1600, 2, 0, OverutilizingI, "CPU 106%, memory 65%"},
+		{"more CPU fits", 4000, "8Gi", 1600, 2, 0, OkI, "CPU 47%, memory 65%"},
+		{"write profile needs more CPU", 2000, "8Gi", 1000, 4, 0, OverutilizingI, "CPU 194%, memory 67%"},
+		{"memory bound", 16000, "2Gi", 1000, 2, 0, OverutilizingI, "CPU 7%, memory 122%"},
+		{"more CPU cannot fix memory", 32000, "2Gi", 1000, 2, 0, OverutilizingI, "CPU 3%, memory 122%"},
+		{"more memory fits", 16000, "4Gi", 1000, 2, 0, OkI, "CPU 7%, memory 75%"},
+		{"three routers share clients", 4000, "16Gi", 1500, 2, 3, OkI, "shard mongod 44%, config server 20%, mongos 69%"},
+		{"routers do not dilute shard load", 2000, "8Gi", 1600, 2, 6, OverutilizingI, "shard mongod at 106%"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ConfigurationRequest{
+				DBType: DbTypeReplicaSet, Dimension: Dimension{Id: DimensionOpen, Cpu: tc.cpu, Memory: tc.memory},
+				Connections: tc.connections, LoadType: LoadType{Id: tc.load},
+			}
+			if tc.mongos > 0 {
+				req.DBType = DbTypeShardedCluster
+				req.Mongos.Count = tc.mongos
+			}
+			resolved, msg, families, err := calculate(t, req)
+			t.Logf("%dm/%s, %d open connections, profile %d: [%d] %s", tc.cpu, tc.memory, tc.connections, tc.load, msg.MType, msg.MText)
+			if msg.MType != tc.wantType || !strings.Contains(msg.MText, tc.wantDetail) {
+				t.Fatalf("got %+v, want type %d and %q", msg, tc.wantType, tc.wantDetail)
+			}
+			if resolved.Connections != tc.connections {
+				t.Fatalf("requested count was changed: got %d, want %d", resolved.Connections, tc.connections)
+			}
+			assumption := fmt.Sprintf("assumes all %d open client connections use the selected workload profile", tc.connections)
+			if !strings.Contains(msg.MText, assumption) {
+				t.Fatalf("result does not explain the total-connection assumption: %s", msg.MText)
+			}
+			if tc.wantType == OverutilizingI {
+				if err == nil || len(families) != 0 {
+					t.Fatalf("overloaded request must fail without configuration: %v %+v", err, families)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertAdmits := func(family string, open int) {
+				t.Helper()
+				limit, err := strconv.Atoi(param(t, families, family, GroupNameConfiguration, "net.maxIncomingConnections"))
+				if err != nil || limit <= open {
+					t.Fatalf("%s connection limit %d must admit %d open connections with headroom: %v", family, limit, open, err)
+				}
+			}
+			assertAdmits(FamilyTypeMongoDB, tc.connections)
+			if tc.mongos > 0 {
+				assertAdmits(FamilyTypeMongos, (tc.connections+tc.mongos-1)/tc.mongos)
+			}
+		})
+	}
+}
 
 func TestShardedClusterFamiliesArePerComponent(t *testing.T) {
 	resolved, _, f, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 5}, LoadType: LoadType{Id: 2}, Connections: 500})

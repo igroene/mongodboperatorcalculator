@@ -101,8 +101,9 @@ func planResources(r ConfigurationRequest) resourcePlan {
 
 // mongodUtilization estimates how much of a mongod container the workload
 // uses. The WiredTiger cache is an allocation, not load, so memory pressure
-// is measured against the memory left outside the cache. Idle connections,
-// such as mongos pool connections, cost thread stack memory but no CPU.
+// is measured against the memory left outside the cache. Every supplied client
+// connection gets the full workload allowance, including currently idle sockets.
+// Additional internal idle pools get only the baseline stack allowance.
 func mongodUtilization(name string, cpu int, memory float64, connections, idleConnections, load int) utilization {
 	nonCache := memory - cacheBytes(memory)
 	needMemory := MongodBaseOverheadMemory + MongodOverheadPct*memory +
@@ -144,7 +145,8 @@ func connectionWorkMemory(load int) float64 {
 	return []float64{0, 0.25 * mib, 0.5 * mib, 1 * mib, 1.5 * mib}[load]
 }
 
-// connectionCPU is the estimated millicores used by one busy connection.
+// connectionCPU is the assumed average millicores per client connection under
+// the selected workload profile. No active/idle discount is applied.
 func connectionCPU(load int) float64 { return []float64{0, 0.5, 1, 2, 3}[load] }
 
 // operatorCacheSizeGB reproduces how the operator derives the
@@ -186,15 +188,19 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 		}
 	}
 	if worst > 1 {
-		text := "estimated capacity exceeded: " + c.overloadDetails()
-		return ResponseMessage{OverutilizingI, OverutilizingT, text}, nil, fmt.Errorf("requested workload exceeds safe resources")
+		text := fmt.Sprintf("estimated capacity exceeded (%s): %s", c.connectionAssumption(), c.overloadDetails())
+		return ResponseMessage{OverutilizingI, OverutilizingT, text}, nil, fmt.Errorf("requested connection count exceeds resources under the selected workload assumptions")
 	}
 	c.populate()
-	text := fmt.Sprintf("estimated capacity utilization is %.0f%% (%s)", worst*100, c.utilizationDetails())
+	text := fmt.Sprintf("estimated capacity utilization is %.0f%% (%s); %s", worst*100, c.utilizationDetails(), c.connectionAssumption())
 	if worst > CloseLimitPct {
 		return ResponseMessage{ClosetolimitI, ClosetolimitT, text}, c.families, nil
 	}
 	return ResponseMessage{OkI, OkT, text}, c.families, nil
+}
+
+func (c *Configurator) connectionAssumption() string {
+	return fmt.Sprintf("assumes all %d open client connections use the selected workload profile", c.request.Connections)
 }
 
 func (c *Configurator) utilizationDetails() string {

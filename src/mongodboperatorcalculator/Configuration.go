@@ -59,9 +59,12 @@ type Configuration struct {
 	MongoDBVersions Versions    `json:"mongodbversions"`
 }
 type ConfigurationRequest struct {
-	DBType           string              `json:"dbtype"`
-	Dimension        Dimension           `json:"dimension"`
-	LoadType         LoadType            `json:"loadtype"`
+	DBType    string    `json:"dbtype"`
+	Dimension Dimension `json:"dimension"`
+	LoadType  LoadType  `json:"loadtype"`
+	// Connections is the peak number of simultaneously open client connections,
+	// including idle pool sockets. Every connection gets the selected workload's
+	// CPU and memory allowance. For sharded clusters, this is the total across mongos.
 	Connections      int                 `json:"connections"`
 	Output           string              `json:"output"`
 	MongoDBVersion   Version             `json:"mongodbversion"`
