@@ -25,7 +25,10 @@ func TestShardedClusterFamiliesArePerComponent(t *testing.T) {
 			t.Fatalf("unexpected PMM resources for %s: %+v", prefix, p)
 		}
 		if _, ok := f[FamilyTypeMonitor].Groups[prefix+GroupNameLivenessProbe]; !ok {
-			t.Fatalf("missing PMM probe for %s", prefix)
+			t.Fatalf("missing PMM liveness probe for %s", prefix)
+		}
+		if _, ok := f[FamilyTypeMonitor].Groups[prefix+GroupNameReadinessProbe]; ok {
+			t.Fatalf("unexpected PMM readiness probe for %s", prefix)
 		}
 	}
 	// 500 client connections split over 3 mongos.
@@ -47,8 +50,8 @@ func TestConfigServerDoesNotScaleWithShard(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resolved.Dimension.ConfigCpu > 2000 || resolved.Dimension.ConfigMemory > 4*gib {
-			t.Fatalf("dimension %d: config server too large: %dm/%v", dim, resolved.Dimension.ConfigCpu, resolved.Dimension.ConfigMemory)
+		if resolved.Dimension.ConfigCpu != ConfigServerTiers[0].Cpu || resolved.Dimension.ConfigMemory != ConfigServerTiers[0].Memory {
+			t.Fatalf("dimension %d: config server should stay on the first tier: %dm/%v", dim, resolved.Dimension.ConfigCpu, resolved.Dimension.ConfigMemory)
 		}
 		if resolved.Dimension.MongosCpu > 1000 || resolved.Dimension.MongosMemory > 1*gib {
 			t.Fatalf("dimension %d: mongos should follow connections, not shard size: %dm/%v", dim, resolved.Dimension.MongosCpu, resolved.Dimension.MongosMemory)
@@ -86,8 +89,13 @@ func TestMongosScalesWithConnectionsAndCount(t *testing.T) {
 func TestShardCapacityIncludesMongosPoolMemory(t *testing.T) {
 	req := ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 2}, LoadType: LoadType{Id: 1}, Connections: 1, Mongos: MongosConfiguration{Count: 100}}
 	_, msg, _, err := calculate(t, req)
+	if err != nil || msg.MType != ClosetolimitI || !strings.Contains(msg.MText, "shard mongod 86%") {
+		t.Fatalf("1000 idle pool connections should push a Small shard close to its limit: %v %+v", err, msg)
+	}
+	req.Connections = 200
+	_, msg, _, err = calculate(t, req)
 	if err == nil || msg.MType != OverutilizingI || !strings.Contains(msg.MText, "shard mongod at") {
-		t.Fatalf("1000 pool connections must not fit in 901Mi outside the cache: %v %+v", err, msg)
+		t.Fatalf("pool connections plus 200 clients must overload a Small shard: %v %+v", err, msg)
 	}
 	few, _, _, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 5}, LoadType: LoadType{Id: 1}, Connections: 100, Mongos: MongosConfiguration{Count: 1}})
 	if err != nil {

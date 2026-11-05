@@ -46,15 +46,69 @@ func memValue(t *testing.T, s string) float64 {
 	return n
 }
 
-func TestWiredTigerCacheIsHalfMongodMemory(t *testing.T) {
-	_, _, f, err := calculate(t, ConfigurationRequest{DBType: DbTypeReplicaSet, Dimension: Dimension{Id: 3}, LoadType: LoadType{Id: 2}, Connections: 50})
+// The operator passes --wiredTigerCacheSizeGB=%.2f of
+// max(0.25, floor(cacheSizeRatio x (limit - 1GiB)) / 1GiB), which overrides
+// any cacheSizeGB in the mongod configuration. The calculator must match it.
+func TestCacheSizeMatchesOperator(t *testing.T) {
+	for memory, want := range map[float64]string{
+		512 * mib:  "0.25",
+		1 * gib:    "0.25",
+		1536 * mib: "0.25",
+		2 * gib:    "0.50",
+		7947 * mib: "3.38",
+		16 * gib:   "7.50",
+		// %.2f rounds: 3.38477GiB becomes 3.38, one MiB more gives 3.38525GiB and 3.39.
+		7956 * mib:  "3.38",
+		7957 * mib:  "3.39",
+		512 * gib:   "255.50",
+		15635316736: "6.78",
+	} {
+		if got := operatorCacheSizeGB(memory); got != want {
+			t.Errorf("operatorCacheSizeGB(%v) = %s, want %s", memory, got, want)
+		}
+	}
+	_, _, f, err := calculate(t, ConfigurationRequest{DBType: DbTypeReplicaSet, Dimension: Dimension{Id: 4}, LoadType: LoadType{Id: 2}, Connections: 50})
 	if err != nil {
 		t.Fatal(err)
 	}
-	limit := memValue(t, param(t, f, FamilyTypeMongoDB, GroupNameResources, "limit_memory"))
-	cache, _ := strconv.ParseFloat(param(t, f, FamilyTypeMongoDB, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB"), 64)
-	if cache*gib > limit*WiredTigerCachePct || cache*gib < limit*WiredTigerCachePct-0.01*gib {
-		t.Fatalf("cache %vGB is not 50%% of limit %v", cache, limit)
+	if got := param(t, f, FamilyTypeMongoDB, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB"); got != "3.38" {
+		t.Fatalf("cacheSizeGB=%s want 3.38", got)
+	}
+	if got := param(t, f, FamilyTypeMongoDB, GroupNameStorage, "wiredTiger.engineConfig.cacheSizeRatio"); got != "0.5" {
+		t.Fatalf("cacheSizeRatio=%s want 0.5", got)
+	}
+}
+
+func TestProbesMatchOperatorDefaults(t *testing.T) {
+	_, _, f, err := calculate(t, ConfigurationRequest{DBType: DbTypeShardedCluster, Dimension: Dimension{Id: 5}, LoadType: LoadType{Id: 2}, Connections: 500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]map[string]string{
+		FamilyTypeMongoDB + "/" + GroupNameReadinessProbe:       {"initialDelaySeconds": "10", "timeoutSeconds": "2", "periodSeconds": "3", "failureThreshold": "8", "successThreshold": "1"},
+		FamilyTypeMongoDB + "/" + GroupNameLivenessProbe:        {"initialDelaySeconds": "60", "timeoutSeconds": "10", "periodSeconds": "30", "failureThreshold": "4", "startupDelaySeconds": "7200"},
+		FamilyTypeConfig + "/" + GroupNameReadinessProbe:        {"initialDelaySeconds": "10", "timeoutSeconds": "2", "periodSeconds": "3", "failureThreshold": "3", "successThreshold": "1"},
+		FamilyTypeConfig + "/" + GroupNameLivenessProbe:         {"initialDelaySeconds": "60", "timeoutSeconds": "10", "periodSeconds": "30", "failureThreshold": "4", "startupDelaySeconds": "7200"},
+		FamilyTypeMongos + "/" + GroupNameReadinessProbe:        {"initialDelaySeconds": "10", "timeoutSeconds": "1", "periodSeconds": "1", "failureThreshold": "3", "successThreshold": "1"},
+		FamilyTypeMongos + "/" + GroupNameLivenessProbe:         {"initialDelaySeconds": "60", "timeoutSeconds": "10", "periodSeconds": "30", "failureThreshold": "4", "startupDelaySeconds": "10"},
+		FamilyTypeMonitor + "/mongos." + GroupNameLivenessProbe: {"initialDelaySeconds": "60", "timeoutSeconds": "5", "periodSeconds": "10", "failureThreshold": "3"},
+	}
+	for key, params := range want {
+		family, group, _ := strings.Cut(key, "/")
+		got := f[family].Groups[group].Parameters
+		if len(got) != len(params) {
+			t.Errorf("%s: got %d parameters %+v, want %+v", key, len(got), got, params)
+		}
+		for name, value := range params {
+			if got[name].Value != value {
+				t.Errorf("%s %s=%q want %q", key, name, got[name].Value, value)
+			}
+		}
+	}
+	for _, prefix := range []string{"mongod.", "configserver.", "mongos."} {
+		if _, ok := f[FamilyTypeMonitor].Groups[prefix+GroupNameReadinessProbe]; ok {
+			t.Errorf("PMM has no readiness probe by default, got one for %s", prefix)
+		}
 	}
 }
 

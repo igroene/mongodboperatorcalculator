@@ -92,7 +92,7 @@ func planResources(r ConfigurationRequest) resourcePlan {
 		d.MongosCpu, d.MongosMemory, mongosUse = sizeMongos(p.mongosConnections, load)
 		p.configConnections = p.mongosCount * MongosPoolConnectionsPerConfig
 		var configUse utilization
-		d.ConfigCpu, d.ConfigMemory, configUse = sizeConfigServer(p.configConnections, d.MongoDBMemory)
+		d.ConfigCpu, d.ConfigMemory, configUse = sizeConfigServer(p.configConnections)
 		p.components = append(p.components, configUse, mongosUse)
 	}
 	p.dimension = d
@@ -125,16 +125,12 @@ func sizeMongos(connections, load int) (int, float64, utilization) {
 }
 
 // sizeConfigServer picks the smallest config-server tier that keeps the
-// metadata workload below CloseLimitPct. Large shards start at the second
-// tier because they usually carry more chunk metadata.
-func sizeConfigServer(connections int, shardMemory float64) (int, float64, utilization) {
-	start := 0
-	if shardMemory >= ConfigLargeShardMemory {
-		start = 1
-	}
+// modelled mongos load below CloseLimitPct. Metadata volume is not an input,
+// so metadata-heavy clusters may need a larger tier than this returns.
+func sizeConfigServer(connections int) (int, float64, utilization) {
 	var tier ConfigServerTier
 	var use utilization
-	for _, tier = range ConfigServerTiers[start:] {
+	for _, tier = range ConfigServerTiers {
 		use = mongodUtilization("config server", tier.Cpu, tier.Memory, connections, 0, LoadTypeMostlyReads)
 		if use.pct() <= CloseLimitPct {
 			break
@@ -151,7 +147,19 @@ func connectionWorkMemory(load int) float64 {
 // connectionCPU is the estimated millicores used by one busy connection.
 func connectionCPU(load int) float64 { return []float64{0, 0.5, 1, 2, 3}[load] }
 
-func cacheBytes(memory float64) float64 { return memory * WiredTigerCachePct }
+// operatorCacheSizeGB reproduces how the operator derives the
+// --wiredTigerCacheSizeGB argument from the mongod memory limit and the
+// default cacheSizeRatio, including its 0.25GB floor and two-decimal format.
+func operatorCacheSizeGB(memory float64) string {
+	size := math.Floor(WiredTigerCacheRatio*(memory-gib)) / gib
+	return fmt.Sprintf("%.2f", math.Max(size, MinCacheSizeGB))
+}
+
+// cacheBytes is the WiredTiger cache mongod actually runs with under the operator.
+func cacheBytes(memory float64) float64 {
+	gb, _ := strconv.ParseFloat(operatorCacheSizeGB(memory), 64)
+	return gb * gib
+}
 
 func maxIncomingConnections(expected, extra int) int {
 	return int(math.Ceil(float64(expected)*ConnectionHeadroomPct)) + extra + InternalConnectionOverhead
@@ -178,7 +186,7 @@ func (c *Configurator) calculate() (ResponseMessage, map[string]Family, error) {
 		}
 	}
 	if worst > 1 {
-		text := "safe capacity exceeded: " + c.overloadDetails()
+		text := "estimated capacity exceeded: " + c.overloadDetails()
 		return ResponseMessage{OverutilizingI, OverutilizingT, text}, nil, fmt.Errorf("requested workload exceeds safe resources")
 	}
 	c.populate()
@@ -243,7 +251,7 @@ func (c *Configurator) populate() {
 		}
 		for _, prefix := range prefixes {
 			c.setPMMResources(monitor, prefix+GroupNameResources)
-			setProbes(monitor, prefix, PMMReadinessProbe, PMMLivenessProbe)
+			writeProbe(monitor, prefix+GroupNameLivenessProbe, PMMLivenessProbe)
 		}
 	}
 
@@ -251,7 +259,7 @@ func (c *Configurator) populate() {
 		config := c.families[FamilyTypeConfig]
 		c.setMongodConfiguration(config, d.ConfigMemory, maxIncomingConnections(c.plan.configConnections, 0))
 		c.setResources(config, GroupNameResources, d.ConfigCpu, d.ConfigMemory)
-		setProbes(config, "", ShardedComponentReadiness, MongodLivenessProbe)
+		setProbes(config, "", ConfigServerReadinessProbe, MongodLivenessProbe)
 		if r.Backup.Enabled {
 			c.setPBMResources(config)
 		}
@@ -259,15 +267,20 @@ func (c *Configurator) populate() {
 		mongos := c.families[FamilyTypeMongos]
 		put(mongos, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(maxIncomingConnections(c.plan.mongosConnections, 0)))
 		c.setResources(mongos, GroupNameResources, d.MongosCpu, d.MongosMemory)
-		setProbes(mongos, "", ShardedComponentReadiness, MongodLivenessProbe)
+		setProbes(mongos, "", MongosReadinessProbe, MongosLivenessProbe)
 	}
 }
 
+// setMongodConfiguration writes the mongod configuration and the storage
+// settings. cacheSizeGB is the value the operator itself passes to mongod as
+// --wiredTigerCacheSizeGB, derived from cacheSizeRatio, so it is consistent
+// with what the pod will run but setting it in configuration has no effect.
 func (c *Configurator) setMongodConfiguration(f Family, memory float64, maxConnections int) {
-	cache := math.Max(cacheBytes(memory), MinCacheSizeGB*gib)
-	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", formatGB(cache))
+	put(f, GroupNameConfiguration, "storage.wiredTiger.engineConfig.cacheSizeGB", operatorCacheSizeGB(memory))
 	put(f, GroupNameConfiguration, "net.maxIncomingConnections", strconv.Itoa(maxConnections))
 	put(f, GroupNameConfiguration, "storage.engine", "wiredTiger")
+	put(f, GroupNameStorage, "engine", "wiredTiger")
+	put(f, GroupNameStorage, "wiredTiger.engineConfig.cacheSizeRatio", strconv.FormatFloat(WiredTigerCacheRatio, 'f', -1, 64))
 }
 
 // setResources writes limits and requests. Requests are RequestPct of the
